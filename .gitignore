@@ -1,0 +1,43 @@
+# Environment & Secrets (NEVER COMMIT)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Rust Build Artifacts
+target/
+**/target/
+backend_rust/target/
+*.pdb
+
+# Frontend Build & Dependencies
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# Local Databases & Dynamic Storage
+storage/*.db
+storage/*.sqlite
+storage/*.sqlite3
+storage/qdrant/
+storage/documents/*
+!storage/documents/.gitkeep
+
+# Python Artifacts & Caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# OS & Editor Artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.bak
