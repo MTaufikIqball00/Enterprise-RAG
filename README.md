@@ -49,34 +49,34 @@ Sistem menerapkan prinsip **Deny-by-Default** dengan verifikasi izin dua lapis (
 
 ```mermaid
 flowchart TD
-    User([Pengguna / Klien]) -->|1. Query + JWT Bearer Token| ViteProxy[Frontend React + Tailwind CSS :5173]
-    ViteProxy -->|2. HTTP REST Request| RustServer[High-Performance Rust Axum Server :8010]
+    User(["Pengguna / Klien"]) -->|"1. Query + JWT Bearer Token"| ViteProxy["Frontend React + Tailwind CSS :5173"]
+    ViteProxy -->|"2. HTTP REST Request"| RustServer["High-Performance Rust Axum Server :8010"]
     
     subgraph SecurityLayer ["Lapisan Keamanan & Multi-Stage Guardrails"]
-        RustServer --> AuthCheck[Autentikasi JWT HS256 & Resolusi Identitas DB]
-        AuthCheck --> InputGuardrail[Input Guardrail: INP-001 Injection, INP-002 Code, INP-003 SARA]
+        RustServer --> AuthCheck["Autentikasi JWT HS256 & Resolusi Identitas DB"]
+        AuthCheck --> InputGuardrail["Input Guardrail: INP-001 Injection, INP-002 Code, INP-003 SARA"]
     end
 
     subgraph RetrievalLayer ["Lapisan Pengambilan Ber-ACL (Pre & Post)"]
-        InputGuardrail -->|3. Lolos Guardrail| PreRetrieval[Pre-Retrieval Filter In-Memory Vector Index]
-        PreRetrieval -->|Filter Role & User ID (Blake2b 256d)| VectorStore[(Vector Store Sinkron SQLite)]
-        VectorStore -->|Kandidat Chunk| PostRetrieval[Post-Retrieval ACL Re-Verification di SQLite]
-        PostRetrieval --> SQLiteDB[(SQLite Database storage/enterprise_rag.db)]
+        InputGuardrail -->|"3. Lolos Guardrail"| PreRetrieval["Pre-Retrieval Filter In-Memory Vector Index"]
+        PreRetrieval -->|"Filter Role & User ID - Blake2b 256d"| VectorStore[("Vector Store Sinkron SQLite")]
+        VectorStore -->|"Kandidat Chunk"| PostRetrieval["Post-Retrieval ACL Re-Verification di SQLite"]
+        PostRetrieval --> SQLiteDB[("SQLite Database storage/enterprise_rag.db")]
     end
 
     subgraph SynthesisLayer ["Lapisan Sintesis & Validasi Bukti"]
-        PostRetrieval -->|Konteks Terverifikasi| GroundedEngine[Grounded Extractive Synthesis & Safe Arithmetic Engine]
-        GroundedEngine --> CitationValidator[Citation & Epistemic Statement Validator]
-        CitationValidator --> OutputGuardrail[Output Guardrail: PII, Hash & Secret Leak Check]
+        PostRetrieval -->|"Konteks Terverifikasi"| GroundedEngine["Grounded Extractive Synthesis & Safe Arithmetic Engine"]
+        GroundedEngine --> CitationValidator["Citation & Epistemic Statement Validator"]
+        CitationValidator --> OutputGuardrail["Output Guardrail: PII, Hash & Secret Leak Check"]
     end
 
     subgraph ObservabilityLayer ["Lapisan Audit & Observabilitas"]
-        OutputGuardrail --> AuditLogger[Redacted Audit Logger Terenkripsi]
-        AuditLogger --> AuditTrail[(Tabel Audit Logs SQLite)]
+        OutputGuardrail --> AuditLogger["Redacted Audit Logger Terenkripsi"]
+        AuditLogger --> AuditTrail[("Tabel Audit Logs SQLite")]
     end
 
-    OutputGuardrail -->|4. Jawaban + Sitasi Provenance + Status Epistemik| ViteProxy
-    ViteProxy -->|5. Tampilan Enterprise Dashboard & Kartu Sitasi| User
+    OutputGuardrail -->|"4. Jawaban + Sitasi Provenance + Status Epistemik"| ViteProxy
+    ViteProxy -->|"5. Tampilan Enterprise Dashboard & Kartu Sitasi"| User
 ```
 
 
@@ -129,7 +129,7 @@ Saat aplikasi di-*seed* pertama kali, akun uji sintetis berikut telah siap digun
 
 ### Prasyarat Sistem
 - **Sistem Operasi:** Windows 10/11 (atau Linux/macOS)
-- **Python:** Versi 3.10 atau lebih baru
+- **Rust Toolchain:** Rust stable 1.75+ (disertai `cargo`)
 - **Node.js & npm:** Node.js v18+ dan npm v9+
 
 ---
@@ -144,9 +144,9 @@ Proyek ini telah dilengkapi skrip otomatis batch launcher:
    ```
    Skrip ini secara otomatis akan:
    - Membuat file `.env` jika belum ada.
-   - Menjalankan migrasi skema database Alembic.
-   - Mengisi (*seed*) akun uji dan dokumen sintetis secara idempoten.
-   - Menjalankan Backend FastAPI pada port **8010**.
+   - Memeriksa binary native Rust `backend_rust.exe` (atau otomatis melakukan kompilasi via `cargo build --release` jika belum ada).
+   - Mengisi (*seed*) akun uji dan dokumen sintetis secara idempoten saat startup server Rust.
+   - Menjalankan Backend Axum Rust berkinerja tinggi pada port **8010**.
    - Menjalankan Frontend React (Vite) pada port **5173**.
    - Membuka browser langsung ke `http://localhost:5173`.
 2. Untuk menghentikan semua layanan secara aman dan bersih, jalankan **[`stop_enterprise_rag.bat`](stop_enterprise_rag.bat)**:
@@ -158,24 +158,15 @@ Proyek ini telah dilengkapi skrip otomatis batch launcher:
 
 ### Opsi B: Menjalankan Secara Manual via Terminal
 
-#### 1. Persiapan Backend
+#### 1. Persiapan & Menjalankan Backend (Rust)
 ```powershell
-# Instal dependensi Python
-python -m pip install -r requirements.txt
+# Masuk ke direktori backend Rust
+cd backend_rust
 
-# Buat file konfigurasi environment
-Copy-Item .env.example .env
-
-# Jalankan migrasi database
-python -m alembic upgrade head
-
-# Jalankan data seeder sintetis
-python -m backend.app.seed_local
-
-# Jalankan server backend FastAPI
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010
+# Jalankan server dalam mode release (performa optimal)
+cargo run --release
 ```
-> Dokumentasi interaktif Swagger OpenAPI dapat diakses di `http://127.0.0.1:8010/docs`.
+> Server backend Rust akan langsung menginisialisasi skema tabel SQLite, melakukan data seeding otomatis, dan mendengarkan permintaan di `http://127.0.0.1:8010`.
 
 #### 2. Persiapan Frontend
 Buka terminal baru:
