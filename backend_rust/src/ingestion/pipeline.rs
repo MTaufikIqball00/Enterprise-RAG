@@ -188,7 +188,7 @@ impl DocumentIngestionService {
 
                 let mut vector_points = Vec::new();
 
-                for (candidate, vector) in chunk_candidates.iter().zip(vectors.into_iter()) {
+                for (candidate, vector) in chunk_candidates.iter().zip(vectors) {
                     let chunk_id = format!("{}-chk-{:04}", doc_id, candidate.chunk_index);
 
                     sqlx::query(

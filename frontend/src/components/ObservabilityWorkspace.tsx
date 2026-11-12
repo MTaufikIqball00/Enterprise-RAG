@@ -131,12 +131,13 @@ export function ObservabilityWorkspace({
 
   const filteredEvalResults = useMemo(() => {
     if (!evalResult) return [];
-    if (evalCategoryFilter === "ALL") return evalResult.results;
+    const list = evalResult.results || [];
+    if (evalCategoryFilter === "ALL") return list;
     if (evalCategoryFilter === "PASSED")
-      return evalResult.results.filter((r) => r.passed);
+      return list.filter((r) => r.passed);
     if (evalCategoryFilter === "FAILED")
-      return evalResult.results.filter((r) => !r.passed);
-    return evalResult.results;
+      return list.filter((r) => !r.passed);
+    return list;
   }, [evalResult, evalCategoryFilter]);
 
   if (!isAdmin) {

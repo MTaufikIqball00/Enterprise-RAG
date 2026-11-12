@@ -182,6 +182,15 @@ impl RAGEvaluationRunner {
         };
 
         serde_json::json!({
+            "total_cases": total,
+            "passed_cases": passed,
+            "failed_cases": total - passed,
+            "pass_rate": if total > 0 { passed as f64 / total as f64 } else { 0.0 },
+            "pass_rate_percent": (pass_rate * 100.0).round() / 100.0,
+            "average_faithfulness": (avg_faithfulness * 10000.0).round() / 10000.0,
+            "average_citation_precision": (avg_precision * 10000.0).round() / 10000.0,
+            "results": results.clone(),
+            "cases": results,
             "summary": {
                 "total_cases": total,
                 "passed_cases": passed,
@@ -190,7 +199,6 @@ impl RAGEvaluationRunner {
                 "average_faithfulness": (avg_faithfulness * 10000.0).round() / 10000.0,
                 "average_citation_precision": (avg_precision * 10000.0).round() / 10000.0,
             },
-            "cases": results,
         })
     }
 }

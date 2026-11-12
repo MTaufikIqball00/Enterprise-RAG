@@ -168,6 +168,44 @@ impl EnterpriseRAGService {
             )
             .await;
 
+            let now_str = chrono::Utc::now().to_rfc3339();
+            let user_msg_id = format!("msg-{}", &Uuid::new_v4().simple().to_string()[..16]);
+            let asst_msg_id = format!("msg-{}", &Uuid::new_v4().simple().to_string()[..16]);
+
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO chat_messages (
+                    message_id, session_id, user_id, sender, content, citations_json,
+                    epistemic_classification, request_id, created_at
+                ) VALUES (?, ?, ?, 'user', ?, '[]', NULL, ?, ?)
+                "#,
+            )
+            .bind(&user_msg_id)
+            .bind(&session_rec.session_id)
+            .bind(&principal.user_id)
+            .bind(question)
+            .bind(&request_id)
+            .bind(&now_str)
+            .execute(pool)
+            .await;
+
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO chat_messages (
+                    message_id, session_id, user_id, sender, content, citations_json,
+                    epistemic_classification, request_id, created_at
+                ) VALUES (?, ?, ?, 'assistant', ?, '[]', 'INFORMASI_TIDAK_TERSEDIA', ?, ?)
+                "#,
+            )
+            .bind(&asst_msg_id)
+            .bind(&session_rec.session_id)
+            .bind(&principal.user_id)
+            .bind(UNIFORM_SAFE_REFUSAL_MESSAGE)
+            .bind(&request_id)
+            .bind(&now_str)
+            .execute(pool)
+            .await;
+
             return Ok(RAGQueryResponse {
                 request_id,
                 session_id: session_rec.session_id,

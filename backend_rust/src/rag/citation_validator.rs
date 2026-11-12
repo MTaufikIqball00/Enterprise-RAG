@@ -97,10 +97,10 @@ impl CitationValidator {
                 _ => {}
             }
 
-            if claim.classification == StatementClassification::ComputedFromSource {
-                if claim.calculation_expression.as_deref().unwrap_or("").trim().is_empty() {
-                    return Err(CitationValidationError::MissingCalculationExpression);
-                }
+            if claim.classification == StatementClassification::ComputedFromSource
+                && claim.calculation_expression.as_deref().unwrap_or("").trim().is_empty()
+            {
+                return Err(CitationValidationError::MissingCalculationExpression);
             }
         }
 

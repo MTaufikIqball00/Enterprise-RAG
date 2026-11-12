@@ -171,22 +171,42 @@ static TYPE_ANNOTATION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\s*\((?:integer|float|string)\)").unwrap()
 });
 
+static METADATA_COLUMNS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "tahun", "year", "no", "nomor", "id", "row", "baris", "kode", "code", "versi",
+        "version", "page", "hal", "halaman", "chunk_index", "line",
+    ]
+    .into_iter()
+    .collect()
+});
+
 pub fn try_reproducible_calculation(
     query: &str,
     query_terms: &HashSet<String>,
     chunks: &[VerifiedChunkContext],
 ) -> Option<(String, String, Vec<String>)> {
     let q_lower = query.to_lowercase();
-    let wants_sum = ["total", "jumlahkan", "akumulasi", "sum"].iter().any(|&k| q_lower.contains(k));
+    let wants_sum = ["total", "jumlah", "jumlahkan", "penjumlahan", "akumulasi", "sum", "tambah", "tambahkan"]
+        .iter()
+        .any(|&k| q_lower.contains(k));
     let wants_avg = ["rata-rata", "average", "mean"].iter().any(|&k| q_lower.contains(k));
 
     if !wants_sum && !wants_avg {
         return None;
     }
 
+    let is_general_aggregate = ["semua", "seluruh", "all"].iter().any(|&k| q_lower.contains(k));
+
     let mut extracted_values: Vec<(f64, String, String)> = Vec::new();
     let mut supporting_chunk_ids: Vec<String> = Vec::new();
     let mut seen_line_signatures: HashSet<String> = HashSet::new();
+
+    // Check if any line in chunks specifically matches non-generic query terms
+    let non_generic_terms: HashSet<String> = query_terms
+        .iter()
+        .filter(|t| !["total", "jumlah", "nilai", "berapa", "data", "pos", "hitung"].contains(&t.as_str()))
+        .cloned()
+        .collect();
 
     for ch in chunks {
         for line in ch.text_content.lines() {
@@ -204,10 +224,23 @@ pub fn try_reproducible_calculation(
             }
             seen_line_signatures.insert(line_sig);
 
+            let line_matches_query = is_general_aggregate
+                || non_generic_terms.is_empty()
+                || non_generic_terms.iter().any(|t| lower_line.contains(t));
+
+            if !line_matches_query {
+                continue;
+            }
+
             let mut matched_in_line = false;
             for cap in KV_NUM_RE.captures_iter(line) {
                 let col_name = &cap[1];
                 let num_str = &cap[2];
+
+                if METADATA_COLUMNS.contains(col_name.to_lowercase().as_str()) {
+                    continue;
+                }
+
                 if let Ok(val) = num_str.parse::<f64>() {
                     extracted_values.push((val, format!("{}={}", col_name, num_str), ch.chunk_id.clone()));
                     if !supporting_chunk_ids.contains(&ch.chunk_id) {
@@ -217,7 +250,7 @@ pub fn try_reproducible_calculation(
                 }
             }
 
-            if !matched_in_line && query_terms.iter().any(|t| lower_line.contains(t)) {
+            if !matched_in_line {
                 for cap in RP_NUM_RE.captures_iter(&lower_line) {
                     let num_str = &cap[1];
                     let clean = num_str.replace('.', "");

@@ -123,15 +123,12 @@ pub fn parse_csv_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec<
         .from_reader(decoded.as_bytes());
 
     let mut all_rows: Vec<(usize, Vec<String>)> = Vec::new();
-    let mut line_idx = 1;
-
-    for result in rdr.records() {
+    for (line_idx, result) in (1..).zip(rdr.records()) {
         let record = result.map_err(|e| DocumentParseError::CsvCorrupt(e.to_string()))?;
         let row_vals: Vec<String> = record.iter().map(|s| s.trim().to_string()).collect();
         if row_vals.iter().any(|s| !s.is_empty()) {
             all_rows.push((line_idx, row_vals));
         }
-        line_idx += 1;
     }
 
     if all_rows.is_empty() {
@@ -354,6 +351,21 @@ pub fn parse_docx_bytes(raw_bytes: &[u8]) -> Result<Vec<ParsedSegment>, Document
                             }
                         }
                     }
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                let name = e.name();
+                if name.as_ref() == b"w:pStyle" {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"w:val" {
+                            let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                            if val.starts_with("heading") {
+                                is_heading = true;
+                            }
+                        }
+                    }
+                } else if name.as_ref() == b"w:tab" || name.as_ref() == b"w:br" {
+                    p_text.push(' ');
                 }
             }
             Ok(quick_xml::events::Event::Text(ref e)) => {

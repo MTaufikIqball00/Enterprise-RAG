@@ -383,5 +383,23 @@ export async function runEvaluationSuiteApi(token: string): Promise<EvaluationSu
   if (!res.ok) {
     throw new Error(await parseApiError(res, "Gagal menjalankan evaluation benchmark"));
   }
-  return res.json();
+  const data = await res.json();
+  const summaryObj = (data.summary || {}) as Record<string, number>;
+  const total = data.total_cases ?? summaryObj.total_cases ?? 0;
+  const passed = data.passed_cases ?? summaryObj.passed_cases ?? 0;
+  const failed = data.failed_cases ?? summaryObj.failed_cases ?? (total - passed);
+  const passRate = data.pass_rate ?? (typeof summaryObj.pass_rate_percent === "number" ? summaryObj.pass_rate_percent / 100 : (total > 0 ? passed / total : 0));
+  const avgFaithfulness = data.average_faithfulness ?? summaryObj.average_faithfulness ?? 0;
+  const avgPrecision = data.average_citation_precision ?? summaryObj.average_citation_precision ?? 0;
+  const casesList = data.results || data.cases || [];
+
+  return {
+    total_cases: total,
+    passed_cases: passed,
+    failed_cases: failed,
+    pass_rate: passRate,
+    average_faithfulness: avgFaithfulness,
+    average_citation_precision: avgPrecision,
+    results: casesList,
+  };
 }
