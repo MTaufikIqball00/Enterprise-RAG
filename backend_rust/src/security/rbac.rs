@@ -210,14 +210,9 @@ impl RBACPolicyEngine {
         // Role-level check (with optional explicit read_scope:<scope> expansion)
         let role_scopes = Self::allowed_read_scopes(principal.role);
         let read_scope_token = format!("read_scope:{}", doc_scope.as_str());
-        if (role_scopes.contains(&doc_scope)
+        (role_scopes.contains(&doc_scope)
             || Self::has_explicit_permission(principal, &read_scope_token))
             && allowed_roles.contains(principal.role.as_str())
-        {
-            return true;
-        }
-
-        false
     }
 
     pub fn require_document_read_access<'a>(
@@ -257,14 +252,9 @@ impl RBACPolicyEngine {
         }
 
         // 3. Explicit `doc:delete` permission within an authorized scope
-        if Self::has_explicit_permission(principal, "doc:delete")
+        Self::has_explicit_permission(principal, "doc:delete")
             && (Self::can_upload_to_scope(principal, doc_scope)
                 || Self::can_read_document(principal, doc))
-        {
-            return true;
-        }
-
-        false
     }
 
     /// Document ACL update authority:
