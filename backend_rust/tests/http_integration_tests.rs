@@ -240,10 +240,11 @@ async fn test_http_auth_logout_jti_revocation_and_rate_limiting() {
         .unwrap();
     assert_eq!(me_revoked.status(), StatusCode::UNAUTHORIZED);
 
-    // Rate limit enforcement on /auth/login (limit=3; 1st call already consumed 1)
-    let _ = login_as(&app, "budi.employee", "WrongPass!").await; // 2nd
-    let _ = login_as(&app, "budi.employee", "WrongPass!").await; // 3rd
-    let (rl_status, _) = login_as(&app, "budi.employee", "WrongPass!").await; // 4th -> 429
+    // Rate limit enforcement on /auth/login (use non-existent username to avoid debug PBKDF2 60s window drift)
+    let _ = login_as(&app, "ratelimit.probe", "WrongPass!").await; // 1st -> 401
+    let _ = login_as(&app, "ratelimit.probe", "WrongPass!").await; // 2nd -> 401
+    let _ = login_as(&app, "ratelimit.probe", "WrongPass!").await; // 3rd -> 401
+    let (rl_status, _) = login_as(&app, "ratelimit.probe", "WrongPass!").await; // 4th -> 429
     assert_eq!(rl_status, StatusCode::TOO_MANY_REQUESTS);
 }
 
