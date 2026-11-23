@@ -2,14 +2,17 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   AdminUserItem,
   RoleChangeAuditItem,
+  createAdminUserApi,
   fetchAdminUsers,
   fetchRoleChangeAudits,
   updateUserRoleApi,
+  updateUserStatusApi,
 } from "../api";
 import {
   AlertTriangleIcon,
   CheckCircleIcon,
   LockIcon,
+  PlusIcon,
   SearchIcon,
   ShieldIcon,
   UsersIcon,
@@ -19,6 +22,7 @@ interface AdminUsersWorkspaceProps {
   token: string;
   currentUserId: string;
   userRole: string;
+  explicitPermissions?: string[];
 }
 
 const AVAILABLE_ROLES = [
@@ -50,17 +54,25 @@ const AVAILABLE_ROLES = [
 ];
 
 const EXPLICIT_PERMISSIONS_CATALOG = [
-  { id: "doc:upload", label: "Unggah Dokumen (doc:upload)" },
-  { id: "doc:delete", label: "Hapus Dokumen (doc:delete)" },
-  { id: "policy:manage", label: "Kelola Role & Kebijakan (policy:manage)" },
-  { id: "audit:read", label: "Baca Audit Log (audit:read)" },
-  { id: "eval:run", label: "Jalankan Evaluasi RAG (eval:run)" },
+  { id: "doc:upload", label: "Unggah Dokumen Scope Terotorisasi (doc:upload)" },
+  { id: "doc:delete", label: "Hapus & Kelola Dokumen Scope Terotorisasi (doc:delete)" },
+  { id: "policy:manage", label: "Kelola Pengguna, Role & Kebijakan (policy:manage)" },
+  { id: "audit:read", label: "Baca Audit Log Teredaksi (audit:read)" },
+  { id: "eval:run", label: "Jalankan Suite Evaluasi 11 Kategori (eval:run)" },
+  { id: "upload:general", label: "Unggah Khusus Scope General (upload:general)" },
+  { id: "upload:hr", label: "Unggah Khusus Scope HR (upload:hr)" },
+  { id: "upload:finance", label: "Unggah Khusus Scope Finance (upload:finance)" },
+  { id: "upload:executive", label: "Unggah Khusus Scope Executive (upload:executive)" },
+  { id: "read_scope:hr", label: "Akses Baca Scope HR (read_scope:hr)" },
+  { id: "read_scope:finance", label: "Akses Baca Scope Finance (read_scope:finance)" },
+  { id: "read_scope:executive", label: "Akses Baca Scope Executive (read_scope:executive)" },
 ];
 
 export function AdminUsersWorkspace({
   token,
   currentUserId,
   userRole,
+  explicitPermissions = [],
 }: AdminUsersWorkspaceProps) {
   const normalizedRole = userRole.toLowerCase();
   const [users, setUsers] = useState<AdminUserItem[]>([]);
@@ -81,7 +93,18 @@ export function AdminUsersWorkspace({
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [modalError, setModalError] = useState<string>("");
 
-  const isAdmin = normalizedRole === "admin";
+  // Modal state for creating a new user
+  const [createModalOpen, setCreateModalOpen] = useState<boolean>(false);
+  const [newUsername, setNewUsername] = useState<string>("");
+  const [newEmail, setNewEmail] = useState<string>("");
+  const [newPassword, setNewPassword] = useState<string>("");
+  const [newRole, setNewRole] = useState<string>("employee");
+  const [newPermissions, setNewPermissions] = useState<string[]>([]);
+  const [creatingUser, setCreatingUser] = useState<boolean>(false);
+  const [createError, setCreateError] = useState<string>("");
+
+  const isAdmin =
+    normalizedRole === "admin" || explicitPermissions.includes("policy:manage");
 
   useEffect(() => {
     if (!isAdmin) {
@@ -109,6 +132,82 @@ export function AdminUsersWorkspace({
       );
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleCreateUser(e: React.FormEvent) {
+    e.preventDefault();
+    setCreateError("");
+    if (newUsername.trim().length < 3) {
+      setCreateError("Username minimal 3 karakter.");
+      return;
+    }
+    if (!newEmail.includes("@")) {
+      setCreateError("Alamat email tidak valid.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setCreateError("Kata sandi minimal 8 karakter.");
+      return;
+    }
+    setCreatingUser(true);
+    try {
+      const created = await createAdminUserApi(token, {
+        username: newUsername.trim(),
+        email: newEmail.trim(),
+        password: newPassword,
+        role: newRole,
+        explicit_permissions: newPermissions,
+      });
+      setSuccessMsg(
+        `Pengguna baru "${created.username}" (${created.role.toUpperCase()}) berhasil dibuat dan dicatat ke Audit Log.`
+      );
+      setCreateModalOpen(false);
+      setNewUsername("");
+      setNewEmail("");
+      setNewPassword("");
+      setNewRole("employee");
+      setNewPermissions([]);
+      await loadAdminData();
+    } catch (err: unknown) {
+      setCreateError(
+        err instanceof Error ? err.message : "Gagal membuat pengguna baru."
+      );
+    } finally {
+      setCreatingUser(false);
+    }
+  }
+
+  async function handleToggleUserStatus(user: AdminUserItem) {
+    const nextActive = !user.is_active;
+    const actionLabel = nextActive ? "mengaktifkan kembali" : "menonaktifkan";
+    const reason = window.prompt(
+      `Masukkan alasan audit (min. 5 karakter) untuk ${actionLabel} akun "${user.username}":`,
+      nextActive
+        ? "Aktivasi kembali akun berdasarkan persetujuan keamanan"
+        : "Penonaktifan sementara akun berdasarkan kebijakan kepatuhan"
+    );
+    if (!reason) return;
+    if (reason.trim().length < 5) {
+      setErrorMsg("Alasan audit perubahan status minimal 5 karakter.");
+      return;
+    }
+    setErrorMsg("");
+    setSuccessMsg("");
+    try {
+      await updateUserStatusApi(token, user.user_id, nextActive, reason.trim());
+      setSuccessMsg(
+        `Status akun "${user.username}" berhasil diubah menjadi ${
+          nextActive ? "AKTIF" : "NONAKTIF"
+        } dan tercatat di Audit Log.`
+      );
+      await loadAdminData();
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Gagal memperbarui status akun pengguna."
+      );
     }
   }
 
@@ -229,14 +328,26 @@ export function AdminUsersWorkspace({
               yang dicatat secara permanen.
             </p>
           </div>
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={() => void loadAdminData()}
-            disabled={loading}
-          >
-            Muat Ulang Data
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setCreateError("");
+                setCreateModalOpen(true);
+              }}
+            >
+              <PlusIcon size={14} /> Tambah Pengguna
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => void loadAdminData()}
+              disabled={loading}
+            >
+              Muat Ulang Data
+            </button>
+          </div>
         </div>
         <div className="card-body">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
@@ -427,21 +538,39 @@ export function AdminUsersWorkspace({
                           )}
                         </td>
                         <td className="text-right">
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => openEditModal(u)}
-                            disabled={isSelf}
-                            title={
-                              isSelf
-                                ? "Kebijakan Anti-Self-Escalation melarang Admin mengubah role miliknya sendiri."
-                                : `Ubah role dan izin untuk ${u.username}`
-                            }
-                          >
-                            {isSelf
-                              ? "Terkunci (Akun Sendiri)"
-                              : "Ubah Role & Izin"}
-                          </button>
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => openEditModal(u)}
+                              disabled={isSelf}
+                              title={
+                                isSelf
+                                  ? "Kebijakan Anti-Self-Escalation melarang Admin mengubah role miliknya sendiri."
+                                  : `Ubah role dan izin untuk ${u.username}`
+                              }
+                            >
+                              {isSelf
+                                ? "Terkunci (Akun Sendiri)"
+                                : "Ubah Role & Izin"}
+                            </button>
+                            {!isSelf && (
+                              <button
+                                type="button"
+                                className={`btn btn-sm ${
+                                  u.is_active ? "btn-danger" : "btn-primary"
+                                }`}
+                                onClick={() => void handleToggleUserStatus(u)}
+                                title={
+                                  u.is_active
+                                    ? `Nonaktifkan akun ${u.username}`
+                                    : `Aktifkan kembali akun ${u.username}`
+                                }
+                              >
+                                {u.is_active ? "Nonaktifkan" : "Aktifkan"}
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -517,6 +646,153 @@ export function AdminUsersWorkspace({
           )}
         </div>
       </div>
+
+      {/* Create User Modal */}
+      {createModalOpen && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="modal-create-user-title"
+        >
+          <div className="modal-dialog">
+            <div className="modal-header">
+              <div>
+                <h3 id="modal-create-user-title" className="modal-title">
+                  Tambah Identitas Pengguna Baru
+                </h3>
+                <p className="card-subtitle">
+                  POST <span className="font-mono">/api/v1/admin/users</span> —
+                  Password di-hash dengan PBKDF2-HMAC-SHA256
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setCreateModalOpen(false)}
+                disabled={creatingUser}
+              >
+                Tutup
+              </button>
+            </div>
+            <form onSubmit={handleCreateUser}>
+              <div className="modal-body flex flex-col gap-3.5">
+                {createError && (
+                  <div className="alert alert-danger" role="alert">
+                    <AlertTriangleIcon size={16} className="shrink-0" />
+                    <div>{createError}</div>
+                  </div>
+                )}
+                <div className="field-group">
+                  <label htmlFor="create-username" className="field-label">
+                    Username
+                  </label>
+                  <input
+                    id="create-username"
+                    className="field-input"
+                    value={newUsername}
+                    onChange={(e) => setNewUsername(e.target.value)}
+                    placeholder="Contoh: rina.auditor"
+                    required
+                    disabled={creatingUser}
+                  />
+                </div>
+                <div className="field-group">
+                  <label htmlFor="create-email" className="field-label">
+                    Email Perusahaan
+                  </label>
+                  <input
+                    id="create-email"
+                    type="email"
+                    className="field-input"
+                    value={newEmail}
+                    onChange={(e) => setNewEmail(e.target.value)}
+                    placeholder="rina@perusahaan.co.id"
+                    required
+                    disabled={creatingUser}
+                  />
+                </div>
+                <div className="field-group">
+                  <label htmlFor="create-password" className="field-label">
+                    Kata Sandi Awal (min. 8 karakter)
+                  </label>
+                  <input
+                    id="create-password"
+                    type="password"
+                    className="field-input"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Minimal 8 karakter"
+                    required
+                    disabled={creatingUser}
+                  />
+                </div>
+                <div className="field-group">
+                  <label htmlFor="create-role" className="field-label">
+                    Role Dasar
+                  </label>
+                  <select
+                    id="create-role"
+                    className="field-select"
+                    value={newRole}
+                    onChange={(e) => setNewRole(e.target.value)}
+                    disabled={creatingUser}
+                  >
+                    {AVAILABLE_ROLES.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label} — {r.desc}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field-group">
+                  <span className="field-label">Izin Eksplisit Opsional</span>
+                  <div className="grid grid-cols-1 gap-1.5 max-h-40 overflow-y-auto p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    {EXPLICIT_PERMISSIONS_CATALOG.map((perm) => (
+                      <label
+                        key={perm.id}
+                        className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          className="rounded border-slate-300 text-indigo-600"
+                          checked={newPermissions.includes(perm.id)}
+                          onChange={() =>
+                            setNewPermissions((prev) =>
+                              prev.includes(perm.id)
+                                ? prev.filter((p) => p !== perm.id)
+                                : [...prev, perm.id]
+                            )
+                          }
+                          disabled={creatingUser}
+                        />
+                        <span>{perm.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setCreateModalOpen(false)}
+                  disabled={creatingUser}
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={creatingUser}
+                >
+                  {creatingUser ? "Menyimpan..." : "Buat Pengguna"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Edit Role & Permissions Modal */}
       {editingUser && (

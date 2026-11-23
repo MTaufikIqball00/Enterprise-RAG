@@ -72,17 +72,21 @@ static DANGEROUS_EXECUTION_PATTERNS: LazyLock<Vec<PatternEntry>> = LazyLock::new
     vec![
         PatternEntry {
             name: "sql_drop_delete",
-            regex: RegexBuilder::new(r"\b(DROP\s+TABLE|DELETE\s+FROM\s+users|UNION\s+SELECT\s+password_hash)\b")
-                .case_insensitive(true)
-                .build()
-                .unwrap(),
+            regex: RegexBuilder::new(
+                r"\b(DROP\s+TABLE|DELETE\s+FROM\s+users|UNION\s+SELECT\s+password_hash)\b",
+            )
+            .case_insensitive(true)
+            .build()
+            .unwrap(),
         },
         PatternEntry {
             name: "shell_exec",
-            regex: RegexBuilder::new(r"\b(rm\s+-rf|powershell\s+-enc|cmd\.exe\s+/c|os\.system\(|subprocess\.Popen)\b")
-                .case_insensitive(true)
-                .build()
-                .unwrap(),
+            regex: RegexBuilder::new(
+                r"\b(rm\s+-rf|powershell\s+-enc|cmd\.exe\s+/c|os\.system\(|subprocess\.Popen)\b",
+            )
+            .case_insensitive(true)
+            .build()
+            .unwrap(),
         },
     ]
 });
@@ -145,11 +149,37 @@ static OUTPUT_LEAK_PATTERNS: LazyLock<Vec<PatternEntry>> = LazyLock::new(|| {
         },
         PatternEntry {
             name: "openai_key_leak",
-            regex: Regex::new(r"sk-[A-Za-z0-9]{20,}").unwrap(),
+            regex: Regex::new(r"sk-(?:proj-)?[A-Za-z0-9_\-]{20,}").unwrap(),
+        },
+        PatternEntry {
+            name: "gemini_key_leak",
+            regex: Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(),
+        },
+        PatternEntry {
+            name: "jwt_token_leak",
+            regex: Regex::new(
+                r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
+            )
+            .unwrap(),
         },
         PatternEntry {
             name: "jwt_secret_leak",
             regex: RegexBuilder::new(r"JWT_SECRET_KEY\s*=\s*['\x22]?[A-Za-z0-9_\-]{16,}")
+                .case_insensitive(true)
+                .build()
+                .unwrap(),
+        },
+        PatternEntry {
+            name: "private_key_leak",
+            regex: Regex::new(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----").unwrap(),
+        },
+        PatternEntry {
+            name: "aws_access_key_leak",
+            regex: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
+        },
+        PatternEntry {
+            name: "pii_nik_npwp_leak",
+            regex: RegexBuilder::new(r"\b(?:NIK|No\.?\s*KTP|NPWP)\s*[:=]\s*[\d.\-]{15,20}\b")
                 .case_insensitive(true)
                 .build()
                 .unwrap(),
@@ -205,7 +235,8 @@ impl GuardrailsEngine {
                 stage: GuardrailStage::Input,
                 decision: GuardrailDecisionType::Block,
                 rule_id: "INP-002".to_string(),
-                reason: "Terdeteksi instruksi eksekusi kode/SQL berbahaya di luar cakupan asisten.".to_string(),
+                reason: "Terdeteksi instruksi eksekusi kode/SQL berbahaya di luar cakupan asisten."
+                    .to_string(),
                 triggered_patterns: triggered_exec,
             };
         }
@@ -229,7 +260,9 @@ impl GuardrailsEngine {
                 stage: GuardrailStage::Input,
                 decision: GuardrailDecisionType::Allow,
                 rule_id: "INP-003-CTX-ALLOW".to_string(),
-                reason: "Penyebutan kelompok identitas dalam konteks kebijakan/diskusi sah diizinkan.".to_string(),
+                reason:
+                    "Penyebutan kelompok identitas dalam konteks kebijakan/diskusi sah diizinkan."
+                        .to_string(),
                 triggered_patterns: vec![],
             };
         }
@@ -254,7 +287,10 @@ impl GuardrailsEngine {
             let mut modified = false;
 
             for line in chunk.text_content.lines() {
-                if UNTRUSTED_DOC_DANGEROUS_LINES.iter().any(|p| p.is_match(line)) {
+                if UNTRUSTED_DOC_DANGEROUS_LINES
+                    .iter()
+                    .any(|p| p.is_match(line))
+                {
                     modified = true;
                     clean_lines.push("[REDACTED_UNTRUSTED_DOCUMENT_INSTRUCTION]");
                 } else {
@@ -312,12 +348,15 @@ impl GuardrailsEngine {
                 triggered_patterns: vec![tool_name.to_string()],
             };
         }
-        if tool_name != "safe_arithmetic_Aggregator" {
+        if tool_name != "safe_arithmetic_aggregator" {
             return GuardrailDecision {
                 stage: GuardrailStage::ToolExecution,
                 decision: GuardrailDecisionType::Block,
                 rule_id: "TOOL-002".to_string(),
-                reason: format!("Tool '{}' tidak terdaftar dalam daftar putih keamanan.", tool_name),
+                reason: format!(
+                    "Tool '{}' tidak terdaftar dalam daftar putih keamanan.",
+                    tool_name
+                ),
                 triggered_patterns: vec![tool_name.to_string()],
             };
         }

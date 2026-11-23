@@ -4,6 +4,7 @@ import {
   deleteDocumentApi,
   fetchDocumentDetail,
   fetchDocuments,
+  updateDocumentAclApi,
   uploadDocumentApi,
 } from "../api";
 import {
@@ -11,6 +12,7 @@ import {
   CheckCircleIcon,
   LockIcon,
   SearchIcon,
+  ShieldIcon,
   TrashIcon,
   UploadCloudIcon,
 } from "./Icons";
@@ -18,12 +20,17 @@ import {
 interface DocumentsWorkspaceProps {
   token: string;
   role: string;
+  explicitPermissions?: string[];
 }
 
 const ALLOWED_EXTENSIONS = ["pdf", "docx", "xlsx", "csv"];
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
-export function DocumentsWorkspace({ token, role }: DocumentsWorkspaceProps) {
+export function DocumentsWorkspace({
+  token,
+  role,
+  explicitPermissions = [],
+}: DocumentsWorkspaceProps) {
   const normalizedRole = role.toLowerCase();
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -56,10 +63,15 @@ export function DocumentsWorkspace({ token, role }: DocumentsWorkspaceProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState<boolean>(false);
 
-  // Document Detail & Delete Confirmation Modals
+  // Document Detail, Edit ACL & Delete Confirmation Modals
   const [inspectedDoc, setInspectedDoc] = useState<DocumentItem | null>(null);
   const [docToDelete, setDocToDelete] = useState<DocumentItem | null>(null);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
+
+  const [editingAclDoc, setEditingAclDoc] = useState<DocumentItem | null>(null);
+  const [editAclRoles, setEditAclRoles] = useState<string[]>([]);
+  const [editAclUsers, setEditAclUsers] = useState<string>("");
+  const [isUpdatingAcl, setIsUpdatingAcl] = useState<boolean>(false);
 
   const loadDocs = async () => {
     setLoading(true);
@@ -222,10 +234,63 @@ export function DocumentsWorkspace({ token, role }: DocumentsWorkspaceProps) {
     }
   };
 
+  const openEditAclModal = (doc: DocumentItem) => {
+    setEditingAclDoc(doc);
+    setEditAclRoles(doc.allowed_roles || []);
+    setEditAclUsers((doc.allowed_users || []).join(", "));
+    setErrorMsg("");
+    setSuccessMsg("");
+  };
+
+  const toggleEditAclRole = (targetRole: string) => {
+    setEditAclRoles((prev) =>
+      prev.includes(targetRole)
+        ? prev.filter((r) => r !== targetRole)
+        : [...prev, targetRole]
+    );
+  };
+
+  const handleSaveAclUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingAclDoc) return;
+    if (editAclRoles.length === 0) {
+      setErrorMsg("Minimal satu role non-admin harus dipilih pada ACL dokumen.");
+      return;
+    }
+    setIsUpdatingAcl(true);
+    setErrorMsg("");
+    setSuccessMsg("");
+    try {
+      const parsedUsers = editAclUsers
+        .split(",")
+        .map((u) => u.trim())
+        .filter(Boolean);
+      const updated = await updateDocumentAclApi(
+        token,
+        editingAclDoc.document_id,
+        editAclRoles,
+        parsedUsers
+      );
+      setSuccessMsg(
+        `Kebijakan ACL untuk "${updated.title}" berhasil diperbarui (ACL v${updated.acl_version ?? ""}) dan cache terisolasi telah dibersihkan.`
+      );
+      setEditingAclDoc(null);
+      await loadDocs();
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Pembaruan ACL dokumen ditolak"
+      );
+    } finally {
+      setIsUpdatingAcl(false);
+    }
+  };
+
   const canRoleUploadByPolicy =
     normalizedRole === "hr" ||
     normalizedRole === "finance" ||
-    normalizedRole === "executive";
+    normalizedRole === "executive" ||
+    explicitPermissions.includes("doc:upload") ||
+    explicitPermissions.some((p) => p.startsWith("upload:"));
 
   return (
     <div className="flex flex-col gap-5">
@@ -449,12 +514,24 @@ export function DocumentsWorkspace({ token, role }: DocumentsWorkspaceProps) {
                             >
                               Detail
                             </button>
-                            {canRoleUploadByPolicy && (
+                            {(doc.can_edit_acl || doc.can_manage) && (
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => openEditAclModal(doc)}
+                                aria-label={`Edit ACL dokumen ${doc.title}`}
+                                title="Ubah Document-Level ACL"
+                              >
+                                <ShieldIcon size={13} /> ACL
+                              </button>
+                            )}
+                            {doc.can_manage && (
                               <button
                                 type="button"
                                 className="btn btn-danger btn-sm"
                                 onClick={() => setDocToDelete(doc)}
                                 aria-label={`Hapus dokumen ${doc.title}`}
+                                title="Hapus dokumen (Pemilik atau izin doc:delete)"
                               >
                                 <TrashIcon size={14} />
                               </button>
@@ -686,6 +763,12 @@ export function DocumentsWorkspace({ token, role }: DocumentsWorkspaceProps) {
                 <span className="badge badge-info">{inspectedDoc.scope}</span>
               </div>
               <div className="flex justify-between py-2 border-b border-slate-100">
+                <span className="text-slate-500">Pemilik (Owner User ID):</span>
+                <code className="font-mono text-slate-800">
+                  {inspectedDoc.owner_user_id || "—"}
+                </code>
+              </div>
+              <div className="flex justify-between py-2 border-b border-slate-100">
                 <span className="text-slate-500">Allowed Roles (ACL):</span>
                 <code className="font-mono text-slate-800">
                   {inspectedDoc.allowed_roles.join(", ")}
@@ -706,6 +789,106 @@ export function DocumentsWorkspace({ token, role }: DocumentsWorkspaceProps) {
                 </strong>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Document ACL Modal */}
+      {editingAclDoc && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => !isUpdatingAcl && setEditingAclDoc(null)}
+        >
+          <div
+            className="modal-dialog max-w-md"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <h3 className="modal-title">Ubah Kebijakan ACL Dokumen</h3>
+                <p className="card-subtitle">
+                  <code className="font-mono">
+                    PATCH /api/v1/documents/{editingAclDoc.document_id}/acl
+                  </code>
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={isUpdatingAcl}
+                onClick={() => setEditingAclDoc(null)}
+              >
+                Tutup
+              </button>
+            </div>
+            <form onSubmit={handleSaveAclUpdate}>
+              <div className="modal-body flex flex-col gap-4">
+                <div className="text-xs text-slate-700">
+                  Dokumen: <strong>{editingAclDoc.title}</strong> (Scope:{" "}
+                  <span className="font-mono">{editingAclDoc.scope}</span>)
+                </div>
+
+                <div className="field-group">
+                  <span className="field-label">
+                    Role Non-Admin yang Diizinkan Membaca:
+                  </span>
+                  <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                    {(["employee", "hr", "finance", "executive"] as const).map(
+                      (rName) => (
+                        <label
+                          key={rName}
+                          className="flex items-center gap-2 cursor-pointer text-xs text-slate-800"
+                        >
+                          <input
+                            type="checkbox"
+                            className="rounded border-slate-300 text-indigo-600"
+                            checked={editAclRoles.includes(rName)}
+                            onChange={() => toggleEditAclRole(rName)}
+                            disabled={isUpdatingAcl}
+                          />
+                          <span>
+                            Role: <strong>{rName.toUpperCase()}</strong>
+                          </span>
+                        </label>
+                      )
+                    )}
+                  </div>
+                </div>
+
+                <div className="field-group">
+                  <label htmlFor="edit-acl-users" className="field-label">
+                    Allowed User IDs (Opsional, pisahkan koma)
+                  </label>
+                  <input
+                    id="edit-acl-users"
+                    className="field-input"
+                    value={editAclUsers}
+                    onChange={(e) => setEditAclUsers(e.target.value)}
+                    placeholder="Contoh: usr-fin-1, usr-exec-1"
+                    disabled={isUpdatingAcl}
+                  />
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={isUpdatingAcl}
+                  onClick={() => setEditingAclDoc(null)}
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={isUpdatingAcl}
+                >
+                  {isUpdatingAcl ? "Menyimpan ACL..." : "Simpan Kebijakan ACL"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -735,7 +918,7 @@ export function DocumentsWorkspace({ token, role }: DocumentsWorkspaceProps) {
                 {docToDelete.document_id}
               </code>
               )? Tindakan ini akan menghapus seluruh chunk dari database
-              relasional dan vector index Qdrant secara permanen.
+              relasional SQLite, FTS5, dan vector index secara permanen.
             </div>
             <div className="modal-footer">
               <button

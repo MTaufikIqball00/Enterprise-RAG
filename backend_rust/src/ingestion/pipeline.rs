@@ -1,7 +1,7 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use std::path::PathBuf;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::core::config::Settings;
@@ -12,6 +12,16 @@ use crate::ingestion::parsers::parse_document_bytes;
 use crate::rag::vector_store::{VectorPoint, VectorStore};
 use crate::schemas::architecture::AuthenticatedPrincipal;
 use crate::security::rbac::RBACPolicyEngine;
+
+pub struct IngestDocumentInput<'a> {
+    pub title: &'a str,
+    pub filename: &'a str,
+    pub raw_bytes: &'a [u8],
+    pub scope: DocumentScope,
+    pub allowed_roles: &'a [UserRole],
+    pub allowed_users: &'a [String],
+    pub version: i64,
+}
 
 pub struct DocumentIngestionService {
     pub vector_store: VectorStore,
@@ -30,14 +40,16 @@ impl DocumentIngestionService {
         &self,
         pool: &SqlitePool,
         principal: &AuthenticatedPrincipal,
-        title: &str,
-        filename: &str,
-        raw_bytes: &[u8],
-        scope: DocumentScope,
-        allowed_roles: &[UserRole],
-        allowed_users: &[String],
-        version: i64,
+        input: IngestDocumentInput<'_>,
     ) -> Result<DocumentRecord, anyhow::Error> {
+        let title = input.title;
+        let filename = input.filename;
+        let raw_bytes = input.raw_bytes;
+        let scope = input.scope;
+        let allowed_roles = input.allowed_roles;
+        let allowed_users = input.allowed_users;
+        let version = input.version;
+
         // 1. Verify uploader permission for target scope (Deny-by-default)
         RBACPolicyEngine::require_upload_permission(principal, scope)?;
 
@@ -141,6 +153,8 @@ impl DocumentIngestionService {
             sqlx::query(
                 r#"
                 UPDATE documents SET
+                    owner_user_id = ?,
+                    title = ?,
                     ingestion_status = 'PROCESSING',
                     ingestion_error = NULL,
                     allowed_roles = ?,
@@ -149,6 +163,8 @@ impl DocumentIngestionService {
                 WHERE document_id = ?
                 "#,
             )
+            .bind(&principal.user_id)
+            .bind(doc_title)
             .bind(&allowed_roles_json)
             .bind(&allowed_users_json)
             .bind(&now_str)
@@ -157,8 +173,12 @@ impl DocumentIngestionService {
             .await?;
         }
 
-        // 4. Parse, chunk, embed, and index
-        match parse_document_bytes(&safe_filename, raw_bytes, self.settings.max_upload_size_bytes) {
+        // 4. Parse, chunk, embed, and index (SQLite chunks + persistent embeddings + FTS5 + VectorStore)
+        match parse_document_bytes(
+            &safe_filename,
+            raw_bytes,
+            self.settings.max_upload_size_bytes,
+        ) {
             Ok((parsed_file_type, parsed_segments)) => {
                 let chunk_candidates = chunk_parsed_segments(
                     &parsed_segments,
@@ -168,7 +188,8 @@ impl DocumentIngestionService {
                 .map_err(|e| anyhow::anyhow!(e))?;
 
                 if chunk_candidates.is_empty() {
-                    let err_msg = "Tidak ada potongan teks (chunk) valid yang dihasilkan dari dokumen.";
+                    let err_msg =
+                        "Tidak ada potongan teks (chunk) valid yang dihasilkan dari dokumen.";
                     self.mark_failed(pool, &doc_id, err_msg).await?;
                     return Err(anyhow::anyhow!(err_msg));
                 }
@@ -176,15 +197,30 @@ impl DocumentIngestionService {
                 // Write raw file to disk
                 tokio::fs::write(&storage_path, raw_bytes).await?;
 
-                // Delete any old chunks for this document
+                // Delete any old chunks, embeddings, and FTS5 entries for this document
+                sqlx::query("DELETE FROM document_chunks_fts WHERE document_id = ?")
+                    .bind(&doc_id)
+                    .execute(pool)
+                    .await?;
+                sqlx::query("DELETE FROM document_chunk_embeddings WHERE document_id = ?")
+                    .bind(&doc_id)
+                    .execute(pool)
+                    .await?;
                 sqlx::query("DELETE FROM document_chunks WHERE document_id = ?")
                     .bind(&doc_id)
                     .execute(pool)
                     .await?;
 
-                // Embed all chunk texts
-                let chunk_texts: Vec<String> = chunk_candidates.iter().map(|c| c.text_content.clone()).collect();
-                let vectors = self.vector_store.embedding_provider.embed_texts(&chunk_texts);
+                // Embed all chunk texts via configured EmbeddingProvider
+                let chunk_texts: Vec<String> = chunk_candidates
+                    .iter()
+                    .map(|c| c.text_content.clone())
+                    .collect();
+                let vectors = self
+                    .vector_store
+                    .embedding_provider
+                    .embed_texts(&chunk_texts)
+                    .await?;
 
                 let mut vector_points = Vec::new();
 
@@ -215,6 +251,28 @@ impl DocumentIngestionService {
                     .execute(pool)
                     .await?;
 
+                    // Persist vector embedding to SQLite
+                    let emb_json = serde_json::to_string(&vector)?;
+                    sqlx::query(
+                        "INSERT INTO document_chunk_embeddings (chunk_id, document_id, embedding_json, updated_at) VALUES (?, ?, ?, ?)",
+                    )
+                    .bind(&chunk_id)
+                    .bind(&doc_id)
+                    .bind(&emb_json)
+                    .bind(&now_str)
+                    .execute(pool)
+                    .await?;
+
+                    // Index text in SQLite FTS5 for Hybrid BM25 Retrieval
+                    sqlx::query(
+                        "INSERT INTO document_chunks_fts (chunk_id, document_id, text_content) VALUES (?, ?, ?)",
+                    )
+                    .bind(&chunk_id)
+                    .bind(&doc_id)
+                    .bind(&candidate.text_content)
+                    .execute(pool)
+                    .await?;
+
                     vector_points.push(VectorPoint {
                         chunk_id,
                         document_id: doc_id.clone(),
@@ -237,7 +295,7 @@ impl DocumentIngestionService {
                     });
                 }
 
-                // Upsert to in-memory/retrieval vector index
+                // Upsert to vector index (in-memory + optional external Qdrant)
                 self.vector_store.upsert_points(vector_points).await;
 
                 // Update document to INDEXED status
@@ -276,7 +334,12 @@ impl DocumentIngestionService {
         }
     }
 
-    async fn mark_failed(&self, pool: &SqlitePool, doc_id: &str, error_msg: &str) -> Result<(), sqlx::Error> {
+    async fn mark_failed(
+        &self,
+        pool: &SqlitePool,
+        doc_id: &str,
+        error_msg: &str,
+    ) -> Result<(), sqlx::Error> {
         let now_str = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE documents SET ingestion_status = 'FAILED', ingestion_error = ?, updated_at = ? WHERE document_id = ?",
@@ -297,16 +360,19 @@ impl DocumentIngestionService {
         allowed_roles: &[UserRole],
         allowed_users: &[String],
     ) -> Result<DocumentRecord, anyhow::Error> {
-        let doc = sqlx::query_as::<_, DocumentRecord>(
-            "SELECT * FROM documents WHERE document_id = ?",
-        )
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await?;
+        let doc =
+            sqlx::query_as::<_, DocumentRecord>("SELECT * FROM documents WHERE document_id = ?")
+                .bind(document_id)
+                .fetch_optional(pool)
+                .await?;
 
         let doc = match doc {
-            Some(d) if RBACPolicyEngine::can_manage_document(principal, &d) => d,
-            _ => return Err(anyhow::anyhow!("Akses ditolak untuk mengubah ACL dokumen ini.")),
+            Some(d) if RBACPolicyEngine::can_edit_document_acl(principal, &d) => d,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Akses ditolak untuk mengubah ACL dokumen ini."
+                ))
+            }
         };
 
         let mut normalized_roles: Vec<String> = allowed_roles
@@ -317,7 +383,17 @@ impl DocumentIngestionService {
         normalized_roles.sort();
         normalized_roles.dedup();
 
-        let mut normalized_users: Vec<String> = allowed_users.to_vec();
+        if normalized_roles.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Document ACL harus menyertakan minimal satu role non-admin yang diizinkan."
+            ));
+        }
+
+        let mut normalized_users: Vec<String> = allowed_users
+            .iter()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect();
         normalized_users.sort();
         normalized_users.dedup();
 
@@ -338,15 +414,19 @@ impl DocumentIngestionService {
         .await?;
 
         self.vector_store
-            .update_document_acl(document_id, normalized_roles, normalized_users, new_acl_version)
+            .update_document_acl(
+                document_id,
+                normalized_roles,
+                normalized_users,
+                new_acl_version,
+            )
             .await;
 
-        let updated_doc = sqlx::query_as::<_, DocumentRecord>(
-            "SELECT * FROM documents WHERE document_id = ?",
-        )
-        .bind(document_id)
-        .fetch_one(pool)
-        .await?;
+        let updated_doc =
+            sqlx::query_as::<_, DocumentRecord>("SELECT * FROM documents WHERE document_id = ?")
+                .bind(document_id)
+                .fetch_one(pool)
+                .await?;
 
         Ok(updated_doc)
     }
@@ -357,22 +437,33 @@ impl DocumentIngestionService {
         principal: &AuthenticatedPrincipal,
         document_id: &str,
     ) -> Result<DocumentRecord, anyhow::Error> {
-        let doc = sqlx::query_as::<_, DocumentRecord>(
-            "SELECT * FROM documents WHERE document_id = ?",
-        )
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await?;
+        let doc =
+            sqlx::query_as::<_, DocumentRecord>("SELECT * FROM documents WHERE document_id = ?")
+                .bind(document_id)
+                .fetch_optional(pool)
+                .await?;
 
         let doc = match doc {
             Some(d) if RBACPolicyEngine::can_manage_document(principal, &d) => d,
-            _ => return Err(anyhow::anyhow!("Akses ditolak untuk menghapus dokumen ini.")),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Akses ditolak untuk menghapus dokumen ini."
+                ))
+            }
         };
 
         // 1. Remove from vector index
         self.vector_store.delete_by_document_id(document_id).await;
 
-        // 2. Delete chunks from SQLite and mark document as DELETED
+        // 2. Delete FTS5 index, embeddings, and chunks from SQLite, then mark document DELETED
+        sqlx::query("DELETE FROM document_chunks_fts WHERE document_id = ?")
+            .bind(document_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM document_chunk_embeddings WHERE document_id = ?")
+            .bind(document_id)
+            .execute(pool)
+            .await?;
         sqlx::query("DELETE FROM document_chunks WHERE document_id = ?")
             .bind(document_id)
             .execute(pool)
@@ -398,12 +489,11 @@ impl DocumentIngestionService {
             }
         }
 
-        let updated = sqlx::query_as::<_, DocumentRecord>(
-            "SELECT * FROM documents WHERE document_id = ?",
-        )
-        .bind(document_id)
-        .fetch_one(pool)
-        .await?;
+        let updated =
+            sqlx::query_as::<_, DocumentRecord>("SELECT * FROM documents WHERE document_id = ?")
+                .bind(document_id)
+                .fetch_one(pool)
+                .await?;
 
         Ok(updated)
     }

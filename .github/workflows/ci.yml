@@ -1,0 +1,54 @@
+name: Enterprise RAG CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust-backend:
+    name: Rust Format, Clippy & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend_rust
+
+      - name: Check formatting (rustfmt)
+        run: cargo fmt --manifest-path backend_rust/Cargo.toml --check
+
+      - name: Run Clippy (deny warnings)
+        run: cargo clippy --manifest-path backend_rust/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run unit & HTTP integration tests
+        run: cargo test --manifest-path backend_rust/Cargo.toml
+
+  frontend-ui:
+    name: Frontend TypeScript & Vite Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm --prefix frontend ci
+
+      - name: Typecheck & Production Build
+        run: npm --prefix frontend run build

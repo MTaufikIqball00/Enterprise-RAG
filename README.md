@@ -6,8 +6,8 @@
 [![SQLx](https://img.shields.io/badge/SQLx-0.8+-blue.svg)](https://github.com/launchbadge/sqlx)
 [![React](https://img.shields.io/badge/React-18-61DAFB.svg)](https://react.dev/)
 [![Tailwind CSS](https://img.shields.io/badge/TailwindCSS-3.4-38B2AC.svg)](https://tailwindcss.com/)
-[![Tests](https://img.shields.io/badge/Rust%20Tests-11%20passed-brightgreen.svg)](#9-menjalankan-suite-pengujian-otomatis)
-[![Evaluation Benchmark](https://img.shields.io/badge/Benchmark-100%25%20Passed-brightgreen.svg)](#9-menjalankan-suite-pengujian-otomatis)
+[![Tests](https://img.shields.io/badge/Rust%20Tests-22%20passed-brightgreen.svg)](#9-menjalankan-suite-pengujian-otomatis)
+[![Evaluation Benchmark](https://img.shields.io/badge/Eval%2011%20Categories-100%25%20Passed-brightgreen.svg)](#9-menjalankan-suite-pengujian-otomatis)
 
 ---
 
@@ -57,17 +57,17 @@ flowchart TD
         AuthCheck --> InputGuardrail["Input Guardrail: INP-001 Injection, INP-002 Code, INP-003 SARA"]
     end
 
-    subgraph RetrievalLayer ["Lapisan Pengambilan Ber-ACL (Pre & Post)"]
-        InputGuardrail -->|"3. Lolos Guardrail"| PreRetrieval["Pre-Retrieval Filter In-Memory Vector Index"]
-        PreRetrieval -->|"Filter Role & User ID - Blake2b 256d"| VectorStore[("Vector Store Sinkron SQLite")]
+    subgraph RetrievalLayer ["Lapisan Pengambilan Hybrid Ber-ACL (Pre & Post)"]
+        InputGuardrail -->|"3. Lolos Guardrail"| PreRetrieval["Pre-Retrieval Hybrid Search: Vector + SQLite FTS5 BM25 (RRF)"]
+        PreRetrieval -->|"Filter Role, User ID & Explicit Perms"| VectorStore[("Persistent Embeddings & FTS5 SQLite / Opsional Qdrant")]
         VectorStore -->|"Kandidat Chunk"| PostRetrieval["Post-Retrieval ACL Re-Verification di SQLite"]
-        PostRetrieval --> SQLiteDB[("SQLite Database storage/enterprise_rag.db")]
+        PostRetrieval --> SQLiteDB[("SQLite WAL + FK Database storage/enterprise_rag.db")]
     end
 
-    subgraph SynthesisLayer ["Lapisan Sintesis & Validasi Bukti"]
-        PostRetrieval -->|"Konteks Terverifikasi"| GroundedEngine["Grounded Extractive Synthesis & Safe Arithmetic Engine"]
-        GroundedEngine --> CitationValidator["Citation & Epistemic Statement Validator"]
-        CitationValidator --> OutputGuardrail["Output Guardrail: PII, Hash & Secret Leak Check"]
+    subgraph SynthesisLayer ["Lapisan Sintesis Multi-Provider & Validasi Bukti"]
+        PostRetrieval -->|"Konteks Terverifikasi + Multi-Turn"| GroundedEngine["LLMProvider Trait (Local / OpenAI / Gemini) & Safe Arithmetic Tool"]
+        GroundedEngine --> CitationValidator["Strict CitationValidator Enforcement (CIT-001)"]
+        CitationValidator --> OutputGuardrail["Output Guardrail: PII, JWT, OpenAI/Gemini Key & Hash Check"]
     end
 
     subgraph ObservabilityLayer ["Lapisan Audit & Observabilitas"]
@@ -87,33 +87,36 @@ flowchart TD
 1. **Role-Based Access Control (RBAC) & Document-Level ACL:**
    - Hak akses *deny-by-default*.
    - Dokumen rahasia (seperti Keuangan) hanya dapat diakses oleh role yang ditentukan secara eksplisit di daftar ACL dokumen, bukan otomatis terbuka untuk semua pengguna atau bahkan admin.
-2. **Double Verification (Pre-Retrieval & Post-Retrieval):**
-   - Vektor pencarian difilter sejak awal di level indeks vektor Qdrant (*pre-retrieval*).
-   - Setiap potongan chunk yang lolos diverifikasi ulang ke database relasional SQLite sebelum dimasukkan ke dalam *prompt context* (*post-retrieval*).
-3. **Multi-Stage Guardrails:**
-   - **Input Guardrail:** Memblokir *Prompt Injection*, pembajakan peran (*role spoofing*), dan serangan manipulasi konteks.
-   - **Kontekstual SARA Guardrail:** Membedakan secara cerdas antara pertanyaan kebijakan inklusivitas yang sah (diizinkan) dengan ujaran kebencian/diskriminasi (diblokir).
-   - **Retrieval & Tool Guardrail:** Memeriksa potensi injeksi tersembunyi di dalam isi file dokumen (*indirect prompt injection*).
-   - **Output Guardrail:** Mencegah kebocoran rahasia sistem, *API key*, token, atau *hash* kredensial pada respons akhir.
-4. **Validasi Sitasi & Deteksi Konflik Sumber:**
+2. **Double Verification & Hybrid Search (Pre-Retrieval & Post-Retrieval):**
+   - Pencarian menggabungkan **Persistent Vector Embeddings** (Blake2b 256d / OpenAI / Gemini) dan **SQLite FTS5 BM25** menggunakan **Reciprocal Rank Fusion (RRF)** (plus dukungan opsional server Qdrant via `QDRANT_URL`).
+   - Setiap kandidat chunk diverifikasi ulang terhadap database relasional SQLite (`PRAGMA foreign_keys = ON`, mode `WAL`) sebelum dimasukkan ke konteks LLM (*post-retrieval*).
+3. **Multi-Stage Guardrails & Strict CitationValidator:**
+   - **Input Guardrail:** Memblokir *Prompt Injection* (`INP-001`), eksekusi SQL/shell berbahaya (`INP-002`), serta pelecehan SARA (`INP-003`) dengan pembedaan kontekstual (`INP-003-CTX-ALLOW`).
+   - **Retrieval & Tool Guardrail:** Menetralkan *indirect prompt injection* (`RET-001`) di dalam dokumen tidak tepercaya dan menegakkan allowlist `safe_arithmetic_aggregator` (`TOOL-PASS`).
+   - **Strict CitationValidator (`CIT-001`):** Klaim yang gagal validasi sitasi ditolak otomatis ke abstention seragam dan dicatat di `audit_logs`.
+   - **Output Guardrail (`OUT-001`):** Memblokir kebocoran hash PBKDF2, OpenAI key (`sk-...`), Gemini key (`AIza...`), token JWT (`eyJ...`), Private Key, AWS Key, dan PII NIK/NPWP.
+4. **Keamanan Operasional & Produksi:**
+   - Allowlist CORS ketat berbasis `CORS_ALLOWED_ORIGINS`, startup guard untuk `JWT_SECRET_KEY` di lingkungan non-development, `ENABLE_DEMO_ACCOUNTS`, revokasi logout JWT (`POST /api/v1/auth/logout`), rate limiting pada `/auth/login` dan `/chat/query`, Bounded Cache (`moka`) yang menyimpan riwayat chat saat cache-hit, serta OpenAPI Swagger UI di `/docs`.
+   - Manajemen User CRUD (`POST /api/v1/admin/users`, `PATCH /api/v1/admin/users/:id/status`), pembaruan Document ACL (`PATCH /api/v1/documents/:id/acl`), dan izin eksplisit granular (`doc:upload`, `doc:delete`, `policy:manage`, `audit:read`, `eval:run`).
+5. **Validasi Sitasi & Deteksi Konflik Sumber:**
    - Setiap pernyataan ditandai status epistemiknya: `Fakta Sumber Terverifikasi`, `Perhitungan Data Sumber`, atau `Inferensi Terbatas`.
-   - Menghitung kalkulasi aritmatika secara deterministik dari tabel data sumber.
+   - Menghitung kalkulasi aritmatika secara deterministik dari tabel data sumber (termasuk tabel DOCX `<w:tbl>`).
    - Mendeteksi secara otomatis apabila ada dua dokumen berbeda yang memberikan informasi/angka yang bertentangan (`has_source_conflict`), menampilkan keduanya secara transparan tanpa mengarang.
-5. **Separation of Duties (Prinsip Least Privilege Admin):**
+6. **Separation of Duties (Prinsip Least Privilege Admin):**
    - Role Administrator (`admin`) bertugas mengelola pengguna, memantau audit log, dan menjalankan benchmark evaluasi.
    - Secara default, Administrator **tidak memiliki akses baca ke dokumen bisnis internal**, mencegah penyalahgunaan wewenang.
-   - Dilengkapi perlindungan *Anti-Self-Privilege-Escalation* (Admin tidak dapat menaikkan atau mengubah role miliknya sendiri).
-6. **Audit Trail Teredaksi & Suite Evaluasi 11 Kategori:**
-   - Seluruh aktivitas dicatat ke database audit dengan sensor otomatis terhadap token, password, dan PII.
-   - Tersedia runner pengujian evaluasi RAG otomatis mencakup 11 skenario kritis keamanan, penolakan saat bukti tidak cukup, dan presisi sitasi.
-7. **Antarmuka Modern (Tailwind CSS):**
-   - Desain responsif enterprise AI workspace dengan mode Tampilan Bersih (*human-friendly cards*) dan mode Tag Audit Mentah untuk kebutuhan inspeksi kepatuhan.
+   - Dilengkapi perlindungan *Anti-Self-Privilege-Escalation* & *Anti-Self-Deactivation* (Admin tidak dapat mengubah role maupun menonaktifkan akun miliknya sendiri).
+7. **Audit Trail Teredaksi & Suite Evaluasi 11 Kategori:**
+   - Seluruh aktivitas dicatat ke database audit dengan sensor otomatis terhadap token JWT, hash PBKDF2, OpenAI/Gemini API key, Private Key, dan password.
+   - Tersedia runner pengujian evaluasi RAG otomatis mencakup **11 skenario kritis** keamanan, konflik sumber, parsing tabel DOCX, penolakan saat bukti tidak cukup, dan presisi sitasi.
+8. **Antarmuka Modern (Tailwind CSS):**
+   - Desain responsif enterprise AI workspace dengan mode Tampilan Bersih (*human-friendly cards*), mode Tag Audit Mentah, modal Edit ACL dokumen, serta manajemen CRUD pengguna.
 
 ---
 
 ## 4. Daftar Akun Pengujian & Matriks Hak Akses
 
-Saat aplikasi di-*seed* pertama kali, akun uji sintetis berikut telah siap digunakan:
+Saat aplikasi dijalankan pada mode `development` dengan `ENABLE_DEMO_ACCOUNTS=true`, akun uji sintetis berikut otomatis di-*seed* dan siap digunakan:
 
 | Username | Password | Role | Hak Akses Dokumen Bawaan | Akses Menu Admin / Audit |
 |---|---|---|---|---|
@@ -166,7 +169,7 @@ cd backend_rust
 # Jalankan server dalam mode release (performa optimal)
 cargo run --release
 ```
-> Server backend Rust akan langsung menginisialisasi skema tabel SQLite, melakukan data seeding otomatis, dan mendengarkan permintaan di `http://127.0.0.1:8010`.
+> Server backend Rust akan langsung menginisialisasi skema tabel SQLite (`WAL` + `PRAGMA foreign_keys = ON`), melakukan data seeding otomatis (jika `ENABLE_DEMO_ACCOUNTS=true`), mendengarkan permintaan di `http://127.0.0.1:8010`, dan menyajikan dokumentasi interaktif OpenAPI Swagger UI di `http://127.0.0.1:8010/docs`.
 
 #### 2. Persiapan Frontend
 Buka terminal baru:
@@ -249,87 +252,80 @@ Folder penyimpanan telah disiapkan pada: **[`docs/images/`](docs/images/)**.
 
 ```text
 Enterprise RAG/
-├── .env.example                           # Template variabel konfigurasi tanpa rahasia
+├── .env.example                           # Template variabel konfigurasi lengkap tanpa rahasia
+├── Dockerfile                             # Multi-stage Docker build (Rust native non-root runtime)
+├── docker-compose.yml                     # Orkestrasi container Backend Rust + Frontend React
+├── .github/workflows/ci.yml               # CI pipeline (rustfmt, clippy -D warnings, cargo test, npm build)
 ├── start_enterprise_rag.bat               # One-click launcher startup sistem (Windows)
 ├── stop_enterprise_rag.bat                # One-click script penghenti proses bersih
 ├── backend_rust/                          # High-Performance Backend Rust (Tokio + Axum + SQLx)
-│   ├── Cargo.toml                         # Dependensi Rust (Axum, Tokio, SQLx, PBKDF2, Blake2b, Serde)
+│   ├── Cargo.toml                         # Dependensi Rust (Axum, Tokio, SQLx, Moka, Reqwest, Utoipa, PBKDF2, Blake2b)
 │   ├── Cargo.lock                         # Lockfile dependensi build Rust
 │   ├── src/
-│   │   ├── main.rs                        # Server entrypoint, listener Axum :8010, & sinkronisasi startup
+│   │   ├── main.rs                        # Server entrypoint, validasi boot, listener Axum :8010, & sinkronisasi Hybrid Index
 │   │   ├── lib.rs                         # Crate library module exports
-│   │   ├── api/routes.rs                  # 17 Endpoint REST API terproteksi RBAC & Guardrails
-│   │   ├── core/                          # Settings (.env), Config, & Typed Domain Enums
-│   │   ├── db/                            # Model SQLx SQLite & auto-initialization skema
-│   │   ├── security/                      # PBKDF2-HMAC-SHA256, JWT HS256, & Engine Otorisasi RBAC
-│   │   ├── guardrails/                    # Engine Multi-Stage Guardrails (INP, RET, TOOL, OUT)
-│   │   ├── rag/                           # Embeddings Blake2b 256d, Vector Store, Grounded LLM, Citation Validator
-│   │   ├── ingestion/                     # Parser PDF (lopdf), DOCX (zip+xml), XLSX (calamine), CSV & Chunking
-│   │   ├── audit/                         # Audit Logger terenkripsi dengan redaksi kredensial
-│   │   └── evaluation/                    # Runner Benchmark Evaluasi 5 Kasus Teruji Assertions
+│   │   ├── api/
+│   │   │   ├── mod.rs                     # Router builder bersama & strict CORS allowlist
+│   │   │   ├── routes.rs                  # 22 Endpoint REST API (Auth/Logout, Documents/ACL, Chat, Admin CRUD, 11-Eval)
+│   │   │   ├── openapi.rs                 # OpenAPI 3.1 (/api-docs/openapi.json) & Swagger UI (/docs) via utoipa
+│   │   │   └── rate_limit.rs              # Fixed-window rate limiter (/auth/login & /chat/query -> HTTP 429)
+│   │   ├── core/                          # Settings (.env), Startup Guard, & Typed Domain Enums
+│   │   ├── db/                            # SQLite WAL + FK schema (revoked_tokens, embeddings, FTS5, audit_logs)
+│   │   ├── security/                      # PBKDF2-HMAC-SHA256, JWT HS256 + JTI revocation, & RBAC + Explicit Permissions
+│   │   ├── guardrails/                    # Engine Multi-Stage Guardrails (INP, RET, TOOL, CIT-001, OUT-001)
+│   │   ├── rag/                           # Multi-Provider Embedding/LLM Traits, Hybrid FTS5+Vector RRF, Moka Cache, Citation Validator
+│   │   ├── ingestion/                     # Parser PDF (lopdf), DOCX (+ <w:tbl>), XLSX (calamine), CSV & Boundary-Aware Chunker
+│   │   ├── audit/                         # Redacted Audit Logger (PBKDF2, JWT, OpenAI/Gemini Key, Private Key)
+│   │   └── evaluation/                    # Runner Benchmark Evaluasi 11 Kategori Teruji Assertions
 │   └── tests/
-│       └── security_and_rag_tests.rs      # 11 Unit & Integration Testsuite Rust (100% PASS)
+│       ├── security_and_rag_tests.rs      # 17 Unit Testsuite Rust (100% PASS)
+│       └── http_integration_tests.rs      # 5 HTTP End-to-End Integration Tests via tower::oneshot (100% PASS)
 ├── frontend/                              # Modern Enterprise Frontend (React 18 + TypeScript + Tailwind CSS)
 │   ├── package.json                       # Dependensi Vite, Tailwind CSS, & React
+│   ├── vercel.json                        # Konfigurasi SPA rewrites untuk deployment Vercel
 │   ├── tailwind.config.js                 # Konfigurasi design tokens & tema Tailwind
 │   ├── postcss.config.js                  # Konfigurasi pipeline PostCSS
 │   ├── vite.config.ts                     # Konfigurasi Vite & Reverse Proxy API (:8010)
 │   └── src/
-│       ├── api.ts                         # Klien API terintegrasi penuh ke 17 endpoint
-│       ├── App.tsx                        # Shell aplikasi, navigasi enterprise, & login
+│       ├── api.ts                         # Klien API terintegrasi penuh (termasuk ACL edit, User CRUD, Logout, Auth Config)
+│       ├── App.tsx                        # Shell aplikasi, navigasi berbasis izin eksplisit, & login adaptif
+│       ├── vite-env.d.ts                  # Deklarasi tipe environment Vite (VITE_API_URL)
 │       ├── styles/theme.css               # Styling terpusat berbasis Tailwind directives
 │       └── components/
 │           ├── Icons.tsx                  # Komponen ikon SVG aksesibel (zero-dependency)
-│           ├── ChatWorkspace.tsx          # Ruang kerja chat, sitasi, & modal provenance
-│           ├── DocumentsWorkspace.tsx     # Repositori dokumen & form upload ber-ACL
-│           ├── AdminUsersWorkspace.tsx    # Manajemen user & riwayat perubahan role
-│           └── ObservabilityWorkspace.tsx # Audit log explorer & evaluation benchmark runner
+│           ├── ChatWorkspace.tsx          # Ruang kerja chat multi-turn, sitasi, & modal provenance
+│           ├── DocumentsWorkspace.tsx     # Repositori dokumen, upload, Edit ACL modal, & hapus ketat per-owner
+│           ├── AdminUsersWorkspace.tsx    # Manajemen user CRUD, explicit permissions catalog, & audit role
+│           └── ObservabilityWorkspace.tsx # Audit log explorer & 11-category evaluation benchmark runner
 ├── docs/                                  # Dokumentasi teknis & visual assets
-│   ├── ARCHITECTURE.md                    # Detail arsitektur & threat model
-│   ├── GUARDRAILS_AND_EVALUATION.md       # Spesifikasi guardrails & metrik evaluasi
+│   ├── ARCHITECTURE.md                    # Detail arsitektur Rust & threat model
+│   ├── GUARDRAILS_AND_EVALUATION.md       # Spesifikasi guardrails & metrik evaluasi 11 kategori
 │   └── images/                            # Folder penyimpanan tangkapan layar produk
 └── storage/                               # Penyimpanan lokal SQLite & dokumen ber-ACL
-    └── documents/                         # Folder dokumen upload fisik
+    └── documents/                         # Folder dokumen upload fisik (.gitkeep)
 ```
 
 ---
 
 ## 9. Menjalankan Suite Pengujian Otomatis
 
-### A. Pengujian Backend Rust (Unit, RBAC, Guardrails, & Paritas Kriptografi)
-Untuk menguji backend Rust secara terisolasi (memverifikasi PBKDF2-HMAC-SHA256, JWT HS256, matriks hak akses RBAC, isolasi vektor ACL, deteksi injeksi input/retrieval, dan validasi sitasi):
+### A. Pengujian Backend Rust (Unit Tests & End-to-End HTTP Integration Tests)
+Untuk menguji backend Rust secara menyeluruh (17 unit tests + 5 HTTP end-to-end integration tests mencakup CORS ketat, revokasi logout JWT, rate limiting 429, cache-hit chat history, DOCX table parser, smart chunker, RBAC/ACL update, CRUD user, audit redaction, dan evaluasi 11 kategori):
 
 ```powershell
-cd backend_rust
-cargo test --test security_and_rag_tests
+cargo fmt --manifest-path backend_rust/Cargo.toml --check
+cargo clippy --manifest-path backend_rust/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path backend_rust/Cargo.toml
 ```
 
-Hasil verifikasi:
-```text
-running 11 tests
-test test_citation_validator ... ok
-test test_rbac_document_access_check ... ok
-test test_rbac_scope_matrices ... ok
-test test_jwt_encode_decode ... ok
-test test_deterministic_blake2b_embeddings ... ok
-test test_vector_store_acl_filtering ... ok
-test test_output_guardrail_credential_leakage ... ok
-test test_retrieval_guardrail_indirect_injection ... ok
-test test_input_guardrail_code_execution ... ok
-test test_input_guardrail_prompt_injection ... ok
-test test_password_hash_and_verify_parity ... ok
-
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 74.25s
-```
-
-### B. Benchmark Evaluasi Otomatis (EVAL-01 s/d EVAL-05 via REST API)
-Jalankan benchmark evaluasi 5 skenario kritis (Grounded Answer, Cross-Role Denial, Reproducible Calculation, Prompt Injection, dan Contextual SARA) melalui API Administrator:
+### B. Benchmark Evaluasi Otomatis 11 Kategori (EVAL-01 s/d EVAL-11 via REST API)
+Jalankan benchmark evaluasi **11 skenario kritis** (Answer Available, Cross-Role Denial, Reproducible Calculation, Prompt Injection, Contextual SARA, Indirect Prompt Injection, Output Credential Leakage, Source Conflict Detection, DOCX Table Provenance, Admin Zero-Read Isolation, dan Out-of-Domain Abstention) melalui API Administrator:
 
 ```powershell
 # 1. Login sebagai Administrator
 $login = Invoke-RestMethod -Uri "http://127.0.0.1:8010/api/v1/auth/login" -Method Post -ContentType "application/json" -Body '{"username":"rudi.admin","password":"AdmPass#2026!"}'
 
-# 2. Jalankan Suite Evaluasi
+# 2. Jalankan Suite Evaluasi 11 Kategori
 $eval = Invoke-RestMethod -Uri "http://127.0.0.1:8010/api/v1/admin/run-evaluation" -Method Post -Headers @{ Authorization = "Bearer $($login.access_token)" }
 $eval.summary | ConvertTo-Json
 ```
@@ -341,16 +337,22 @@ Hasil verifikasi:
   "average_faithfulness": 1.0,
   "failed_cases": 0,
   "pass_rate_percent": 100.0,
-  "passed_cases": 5,
-  "total_cases": 5
+  "passed_cases": 11,
+  "total_cases": 11
 }
 ```
+
+### C. Menjalankan dengan Docker Compose & CI
+```powershell
+docker compose up --build
+```
+Pipeline CI otomatis tersedia di [`.github/workflows/ci.yml`](.github/workflows/ci.yml) yang memverifikasi `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, dan `npm run build`.
 
 ---
 
 ## 10. Keterbatasan yang Diketahui & Catatan Kesiapan Produksi
 
 Sesuai prinsip **Zero Assumption & Evidence-Based Development**:
-1. **Mode Penyimpanan Data:** Sistem saat ini menggunakan `SQLite` dan `Qdrant Local Persistence` pada folder `./storage/`. Untuk lingkungan produksi skala besar dengan ribuan pengguna konkuren, arahkan `DATABASE_URL` ke PostgreSQL berkluster dan gunakan server Qdrant mandiri.
-2. **Lapisan Teks PDF:** Parser PDF mengekstrak teks digital berbasis halaman. File PDF yang hanya berupa pindaian gambar murni (*scanned image*) akan ditolak secara jujur karena engine OCR lokal tidak diinstal untuk menjaga portabilitas zero-dependency.
-3. **Mode Model Default:** Secara bawaan sistem menggunakan `local_grounded` deterministik untuk memastikan bahwa seluruh pengujian keamanan dapat dijalankan secara mandiri dan dapat diulang (*reproducible*) tanpa ketergantungan API eksternal atau biaya komputasi pihak ketiga. Untuk mengaktifkan penyedia cloud (seperti OpenAI atau Gemini), cukup cantumkan API Key pada file `.env`.
+1. **Mode Penyimpanan Data:** Sistem menggunakan `SQLite` (mode `WAL` + `PRAGMA foreign_keys = ON`) dengan penyimpanan embedding persisten (`document_chunk_embeddings`) dan **SQLite FTS5 BM25 Hybrid Search** pada folder `./storage/`, serta mendukung integrasi opsional ke server Qdrant eksternal melalui variabel `QDRANT_URL`.
+2. **Lapisan Teks PDF:** Parser PDF (`lopdf`) mengekstrak teks digital berbasis halaman. File PDF yang hanya berupa pindaian gambar murni (*scanned image*) akan ditolak secara jujur karena engine OCR lokal tidak diinstal.
+3. **Mode Model Default & Multi-Provider:** Secara bawaan sistem menggunakan `local_grounded` & `local_deterministic` agar seluruh pengujian keamanan dapat dijalankan offline dan 100% *reproducible*. Untuk mengaktifkan penyedia cloud (**OpenAI** atau **Gemini**), atur `LLM_PROVIDER`, `EMBEDDING_PROVIDER`, dan API Key pada file `.env` — seluruh respons cloud tetap melewati validasi ketat `CitationValidator` dan `Output Guardrail`.

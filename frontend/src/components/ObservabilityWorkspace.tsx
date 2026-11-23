@@ -17,14 +17,23 @@ import {
 interface ObservabilityWorkspaceProps {
   token: string;
   userRole: string;
+  explicitPermissions?: string[];
 }
 
 export function ObservabilityWorkspace({
   token,
   userRole,
+  explicitPermissions = [],
 }: ObservabilityWorkspaceProps) {
   const normalizedRole = userRole.toLowerCase();
-  const [subView, setSubView] = useState<"audit" | "evaluation">("audit");
+  const isAdmin = normalizedRole === "admin";
+  const canReadAudit = isAdmin || explicitPermissions.includes("audit:read");
+  const canRunEval = isAdmin || explicitPermissions.includes("eval:run");
+  const hasAnyAccess = canReadAudit || canRunEval;
+
+  const [subView, setSubView] = useState<"audit" | "evaluation">(
+    canReadAudit ? "audit" : "evaluation"
+  );
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [loadingAudit, setLoadingAudit] = useState<boolean>(true);
   const [auditError, setAuditError] = useState<string>("");
@@ -42,15 +51,13 @@ export function ObservabilityWorkspace({
   const [evalError, setEvalError] = useState<string>("");
   const [evalCategoryFilter, setEvalCategoryFilter] = useState<string>("ALL");
 
-  const isAdmin = normalizedRole === "admin";
-
   useEffect(() => {
-    if (!isAdmin) {
+    if (!canReadAudit) {
       setLoadingAudit(false);
       return;
     }
     void loadAuditTrail();
-  }, [token, isAdmin]);
+  }, [token, canReadAudit]);
 
   async function loadAuditTrail() {
     setLoadingAudit(true);
@@ -140,7 +147,7 @@ export function ObservabilityWorkspace({
     return list;
   }, [evalResult, evalCategoryFilter]);
 
-  if (!isAdmin) {
+  if (!hasAnyAccess) {
     return (
       <div
         className="p-10 text-center bg-white rounded-xl border border-dashed border-slate-300 flex flex-col items-center gap-2.5"
@@ -510,9 +517,9 @@ export function ObservabilityWorkspace({
                 <ActivityIcon size={18} className="shrink-0" />
                 <div>
                   <strong>Sedang Mengeksekusi Skenario Pengujian...</strong>{" "}
-                  Sistem sedang menguji dokumen terindeks di Qdrant, filter
-                  RBAC, dan validator sitasi secara langsung. Mohon tunggu
-                  beberapa detik.
+                  Sistem sedang menguji dokumen terindeks di Hybrid Vector +
+                  SQLite FTS5 Index, filter RBAC, dan validator sitasi secara
+                  langsung. Mohon tunggu beberapa detik.
                 </div>
               </div>
             )}

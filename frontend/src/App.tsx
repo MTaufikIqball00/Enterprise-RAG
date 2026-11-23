@@ -2,8 +2,10 @@ import React, { useEffect, useState } from "react";
 import {
   AuthenticatedPrincipal,
   checkBackendHealth,
+  fetchAuthConfig,
   getMeApi,
   loginApi,
+  logoutApi,
 } from "./api";
 import { AdminUsersWorkspace } from "./components/AdminUsersWorkspace";
 import { ChatWorkspace } from "./components/ChatWorkspace";
@@ -72,10 +74,11 @@ export default function App() {
   const [verifyingSession, setVerifyingSession] = useState<boolean>(false);
 
   // Login form state
-  const [username, setUsername] = useState<string>("budi.employee");
-  const [password, setPassword] = useState<string>("EmpPass#2026!");
+  const [username, setUsername] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
   const [loginLoading, setLoginLoading] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string>("");
+  const [enableDemoAccounts, setEnableDemoAccounts] = useState<boolean>(false);
 
   // Navigation & UI state
   const [activeSection, setActiveSection] = useState<WorkspaceSection>("chat");
@@ -87,7 +90,21 @@ export default function App() {
 
   useEffect(() => {
     void verifyHealth();
+    void loadAuthConfig();
   }, []);
+
+  async function loadAuthConfig() {
+    try {
+      const cfg = await fetchAuthConfig();
+      setEnableDemoAccounts(cfg.enable_demo_accounts);
+      if (cfg.enable_demo_accounts) {
+        setUsername((prev) => prev || "budi.employee");
+        setPassword((prev) => prev || "EmpPass#2026!");
+      }
+    } catch {
+      setEnableDemoAccounts(false);
+    }
+  }
 
   useEffect(() => {
     if (!token) {
@@ -148,6 +165,9 @@ export default function App() {
   }
 
   function handleLogout() {
+    if (token) {
+      void logoutApi(token);
+    }
     try {
       sessionStorage.removeItem(SESSION_TOKEN_KEY);
     } catch {
@@ -243,9 +263,9 @@ export default function App() {
                       Pre & Post-Retrieval RBAC Filtering
                     </strong>
                     <span className="text-xs text-slate-400 leading-relaxed">
-                      Otorisasi Deny-by-Default diverifikasi sebelum pencarian
-                      vektor Qdrant dan divalidasi ulang sebelum konteks dikirim
-                      ke model.
+                      Otorisasi Deny-by-Default diverifikasi pada Hybrid Vector
+                      + SQLite FTS5 Index sebelum retrieval dan divalidasi ulang
+                      sebelum konteks dikirim ke model.
                     </span>
                   </div>
                 </div>
@@ -377,41 +397,43 @@ export default function App() {
               </button>
             </form>
 
-            {/* Quick Role Selector for Local Seeded Accounts */}
-            <div className="pt-4 border-t border-slate-200">
-              <div className="text-xs font-semibold text-slate-600 mb-2.5">
-                Pilih Cepat Akun Pengujian Lokal (Seeded RBAC Roles):
+            {/* Quick Role Selector — strictly gated by backend ENABLE_DEMO_ACCOUNTS */}
+            {enableDemoAccounts && (
+              <div className="pt-4 border-t border-slate-200">
+                <div className="text-xs font-semibold text-slate-600 mb-2.5">
+                  Pilih Cepat Akun Pengujian Lokal (Development Demo Mode):
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {SEEDED_ACCOUNTS.map((acc) => {
+                    const selected = username === acc.username;
+                    return (
+                      <button
+                        key={acc.username}
+                        type="button"
+                        onClick={() => selectDemoAccount(acc.username, acc.password)}
+                        className={`text-left px-3 py-2 rounded-lg border transition-all ${
+                          selected
+                            ? "border-indigo-600 bg-indigo-50/70 ring-1 ring-indigo-600/20"
+                            : "border-slate-200 bg-slate-50 hover:bg-slate-100 hover:border-slate-300"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-mono font-bold text-xs text-slate-900">
+                            {acc.username}
+                          </span>
+                          <span className="badge badge-accent text-[10px] px-1.5 py-0">
+                            {acc.role}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5 truncate">
+                          {acc.scopeSummary}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {SEEDED_ACCOUNTS.map((acc) => {
-                  const selected = username === acc.username;
-                  return (
-                    <button
-                      key={acc.username}
-                      type="button"
-                      onClick={() => selectDemoAccount(acc.username, acc.password)}
-                      className={`text-left px-3 py-2 rounded-lg border transition-all ${
-                        selected
-                          ? "border-indigo-600 bg-indigo-50/70 ring-1 ring-indigo-600/20"
-                          : "border-slate-200 bg-slate-50 hover:bg-slate-100 hover:border-slate-300"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="font-mono font-bold text-xs text-slate-900">
-                          {acc.username}
-                        </span>
-                        <span className="badge badge-accent text-[10px] px-1.5 py-0">
-                          {acc.role}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 mt-0.5 truncate">
-                        {acc.scopeSummary}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            )}
           </div>
         </div>
       </div>
@@ -419,6 +441,12 @@ export default function App() {
   }
 
   const isAdmin = principal.role.toLowerCase() === "admin";
+  const explicitPerms = principal.explicit_permissions || [];
+  const canManagePolicies = isAdmin || explicitPerms.includes("policy:manage");
+  const canViewObservability =
+    isAdmin ||
+    explicitPerms.includes("audit:read") ||
+    explicitPerms.includes("eval:run");
   const currentMeta = sectionMetadata[activeSection];
 
   return (
@@ -510,9 +538,9 @@ export default function App() {
             >
               <UsersIcon size={18} />
               <span className="flex-1">Pengguna & RBAC</span>
-              {!isAdmin && (
+              {!canManagePolicies && (
                 <span
-                  title="Hanya untuk role ADMIN"
+                  title="Hanya untuk role ADMIN atau izin policy:manage"
                   className="opacity-60 inline-flex"
                 >
                   <LockIcon size={13} />
@@ -537,9 +565,9 @@ export default function App() {
             >
               <ActivityIcon size={18} />
               <span className="flex-1">Audit & Evaluasi</span>
-              {!isAdmin && (
+              {!canViewObservability && (
                 <span
-                  title="Hanya untuk role ADMIN"
+                  title="Hanya untuk role ADMIN atau izin audit:read / eval:run"
                   className="opacity-60 inline-flex"
                 >
                   <LockIcon size={13} />
@@ -645,7 +673,11 @@ export default function App() {
           )}
 
           {activeSection === "documents" && (
-            <DocumentsWorkspace token={token} role={principal.role} />
+            <DocumentsWorkspace
+              token={token}
+              role={principal.role}
+              explicitPermissions={explicitPerms}
+            />
           )}
 
           {activeSection === "admin_users" && (
@@ -653,11 +685,16 @@ export default function App() {
               token={token}
               currentUserId={principal.user_id}
               userRole={principal.role}
+              explicitPermissions={explicitPerms}
             />
           )}
 
           {activeSection === "observability" && (
-            <ObservabilityWorkspace token={token} userRole={principal.role} />
+            <ObservabilityWorkspace
+              token={token}
+              userRole={principal.role}
+              explicitPermissions={explicitPerms}
+            />
           )}
         </main>
       </div>
@@ -741,7 +778,8 @@ export default function App() {
                 <ShieldIcon size={18} />
                 <div>
                   <strong>Prinsip Keamanan Deny-by-Default:</strong> Sistem
-                  memfilter seluruh pencarian dokumen di Qdrant menggunakan role{" "}
+                  memfilter seluruh pencarian dokumen pada Hybrid Vector +
+                  SQLite FTS5 Index menggunakan role{" "}
                   <span className="font-mono">{principal.role}</span> dan User
                   ID <span className="font-mono">{principal.user_id}</span>.
                   Dokumen di luar cakupan ACL Anda tidak pernah dimuat ke dalam

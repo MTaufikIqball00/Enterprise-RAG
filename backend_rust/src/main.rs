@@ -1,21 +1,14 @@
-#![allow(dead_code)]
-
 use std::sync::Arc;
-use axum::{
-    extract::Extension,
-    http::{header, Method},
-    Router,
-};
-use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{error, info};
 
-use backend_rust::api::routes::{create_router, AppState};
+use backend_rust::api::build_app;
+use backend_rust::api::rate_limit::RateLimiter;
+use backend_rust::api::routes::AppState;
 use backend_rust::core::config::Settings;
 use backend_rust::db::init_db;
 use backend_rust::ingestion::pipeline::DocumentIngestionService;
-use backend_rust::rag::embeddings::LocalDeterministicEmbeddingProvider;
-use backend_rust::rag::llm::LocalGroundedExtractiveLLMProvider;
+use backend_rust::rag::embeddings::build_embedding_provider;
+use backend_rust::rag::llm::build_llm_provider;
 use backend_rust::rag::service::EnterpriseRAGService;
 use backend_rust::rag::vector_store::{VectorPoint, VectorStore};
 
@@ -29,21 +22,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let settings = Settings::from_env();
+    if let Err(err) = settings.validate() {
+        error!("{}", err);
+        return Err(err.into());
+    }
     settings.ensure_storage_dirs();
 
-    info!("Starting {} v{}", settings.app_name, settings.app_version);
+    info!(
+        "Starting {} v{} (env={})",
+        settings.app_name, settings.app_version, settings.app_env
+    );
     info!("Database URL: {}", settings.database_url);
-    info!("Target Port: {}", settings.port);
+    info!("CORS Allowed Origins: {:?}", settings.cors_allowed_origins);
+    info!("Demo Accounts Enabled: {}", settings.enable_demo_accounts);
 
-    // Initialize SQLite database
-    let pool = init_db(&settings.database_url).await?;
+    // Initialize SQLite database (with PRAGMA foreign_keys=ON and WAL mode)
+    let pool = init_db(&settings.database_url, settings.enable_demo_accounts).await?;
 
-    // Initialize Embedding Provider & Vector Store
-    let embedding_provider = Arc::new(LocalDeterministicEmbeddingProvider::new(
-        settings.embedding_dimension,
-        &settings.embedding_model_name,
-    ));
-    let vector_store = VectorStore::new(embedding_provider.clone());
+    // Build configured Embedding & LLM providers (defaults to offline deterministic local providers)
+    let embedding_provider = build_embedding_provider(&settings);
+    let llm_provider = build_llm_provider(&settings);
+    info!(
+        "Embedding Provider: {} ({})",
+        embedding_provider.provider_name(),
+        embedding_provider.model_name()
+    );
+    info!(
+        "LLM Provider: {} ({})",
+        llm_provider.provider_name(),
+        llm_provider.model_name()
+    );
+
+    let vector_store = VectorStore::with_qdrant(
+        embedding_provider.clone(),
+        settings.qdrant_url.clone(),
+        settings.qdrant_collection_name.clone(),
+    );
 
     #[derive(sqlx::FromRow)]
     struct SyncChunkRow {
@@ -65,17 +79,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         section_label: Option<String>,
         has_potential_injection: bool,
         text_content: String,
+        embedding_json: Option<String>,
     }
 
-    // Synchronize vector store with existing indexed chunks in SQLite
+    // Synchronize persistent embeddings & FTS5 index with existing indexed chunks in SQLite
     let rows: Vec<SyncChunkRow> = sqlx::query_as(
         r#"
         SELECT c.chunk_id, c.document_id, d.title, d.source_filename, d.file_type, d.scope,
                d.allowed_roles, d.allowed_users, d.acl_version, d.version, d.ingestion_status,
                c.page_number, c.sheet_name, c.row_start, c.row_end, c.section_label,
-               c.has_potential_injection, c.text_content
+               c.has_potential_injection, c.text_content, e.embedding_json
         FROM document_chunks c
         JOIN documents d ON c.document_id = d.document_id
+        LEFT JOIN document_chunk_embeddings e ON c.chunk_id = e.chunk_id
         WHERE d.ingestion_status = 'INDEXED'
         "#,
     )
@@ -84,12 +100,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .unwrap_or_default();
 
     if !rows.is_empty() {
-        info!("Synchronizing {} indexed chunks into vector index...", rows.len());
-        let mut points = Vec::new();
+        info!(
+            "Synchronizing {} indexed chunks into hybrid vector + FTS5 index...",
+            rows.len()
+        );
+        let now_str = chrono::Utc::now().to_rfc3339();
+        let mut points = Vec::with_capacity(rows.len());
+
+        // Rebuild FTS5 index cleanly to stay 100% consistent with INDEXED chunks
+        let _ = sqlx::query("DELETE FROM document_chunks_fts")
+            .execute(&pool)
+            .await;
+
         for r in rows {
-            let allowed_roles: Vec<String> = serde_json::from_str(&r.allowed_roles).unwrap_or_default();
-            let allowed_users: Vec<String> = serde_json::from_str(&r.allowed_users).unwrap_or_default();
-            let vector = embedding_provider.embed_single(&r.text_content);
+            let allowed_roles: Vec<String> =
+                serde_json::from_str(&r.allowed_roles).unwrap_or_default();
+            let allowed_users: Vec<String> =
+                serde_json::from_str(&r.allowed_users).unwrap_or_default();
+
+            let vector: Vec<f32> = match r
+                .embedding_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<Vec<f32>>(j).ok())
+                .filter(|v| v.len() == embedding_provider.dimension())
+            {
+                Some(stored) => stored,
+                None => {
+                    let computed = embedding_provider.embed_query(&r.text_content).await?;
+                    let emb_json = serde_json::to_string(&computed)?;
+                    let _ = sqlx::query(
+                        "INSERT OR REPLACE INTO document_chunk_embeddings (chunk_id, document_id, embedding_json, updated_at) VALUES (?, ?, ?, ?)",
+                    )
+                    .bind(&r.chunk_id)
+                    .bind(&r.document_id)
+                    .bind(&emb_json)
+                    .bind(&now_str)
+                    .execute(&pool)
+                    .await;
+                    computed
+                }
+            };
+
+            let _ = sqlx::query(
+                "INSERT INTO document_chunks_fts (chunk_id, document_id, text_content) VALUES (?, ?, ?)",
+            )
+            .bind(&r.chunk_id)
+            .bind(&r.document_id)
+            .bind(&r.text_content)
+            .execute(&pool)
+            .await;
 
             points.push(VectorPoint {
                 chunk_id: r.chunk_id,
@@ -113,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         vector_store.upsert_points(points).await;
-        info!("Vector store synchronization completed.");
+        info!("Hybrid vector + FTS5 synchronization completed.");
     }
 
     let shared_settings = Arc::new(settings.clone());
@@ -123,45 +182,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shared_settings.clone(),
     ));
 
-    let llm_provider = Arc::new(LocalGroundedExtractiveLLMProvider::new(&settings.llm_model_name));
-
     let rag_service = Arc::new(EnterpriseRAGService::new(
         vector_store,
         llm_provider,
         shared_settings.clone(),
     ));
 
+    let rate_limiter = Arc::new(RateLimiter::new(10_000, 60));
+
     let app_state = AppState {
-        pool: pool.clone(),
-        settings: shared_settings.clone(),
+        pool,
+        settings: shared_settings,
         ingestion_service,
         rag_service,
+        rate_limiter,
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |_, _| true)) // Allow configured origins
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
-        .allow_credentials(true);
-
-    let api_router = create_router(app_state);
-
-    let app = Router::new()
-        .nest("/api/v1", api_router)
-        .layer(Extension(settings.clone()))
-        .layer(Extension(pool))
-        .layer(cors)
-        .layer(TraceLayer::new_for_http());
+    let app = build_app(app_state);
 
     let addr = format!("{}:{}", settings.host, settings.port);
     info!("Enterprise RAG Rust Backend listening on http://{}", addr);
+    info!("Swagger OpenAPI UI available at http://{}/docs", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;

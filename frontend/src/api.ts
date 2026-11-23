@@ -78,18 +78,28 @@ export interface ChatMessageHistoryItem {
   created_at: string;
 }
 
+export interface AuthConfigResponse {
+  enable_demo_accounts: boolean;
+  app_env: string;
+  llm_provider: string;
+  embedding_provider: string;
+}
+
 export interface DocumentItem {
   document_id: string;
   title: string;
   source_filename: string;
   file_type: string;
   scope: string;
+  owner_user_id?: string;
   allowed_roles: string[];
   allowed_users?: string[];
   ingestion_status: string;
   chunk_count: number;
   version: number;
   acl_version?: number;
+  can_manage?: boolean;
+  can_edit_acl?: boolean;
 }
 
 export interface AdminUserItem {
@@ -180,6 +190,19 @@ export async function checkBackendHealth(): Promise<{ status: string; service: s
   return res.json();
 }
 
+export async function fetchAuthConfig(): Promise<AuthConfigResponse> {
+  const res = await fetch(`${API_BASE}/auth/config`);
+  if (!res.ok) {
+    return {
+      enable_demo_accounts: false,
+      app_env: "production",
+      llm_provider: "local_grounded",
+      embedding_provider: "local_deterministic",
+    };
+  }
+  return res.json();
+}
+
 export async function loginApi(username: string, password: string) {
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: "POST",
@@ -195,6 +218,17 @@ export async function loginApi(username: string, password: string) {
     username: string;
     role: string;
   }>;
+}
+
+export async function logoutApi(token: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    // Best-effort revocation on logout
+  }
 }
 
 export async function getMeApi(token: string): Promise<AuthenticatedPrincipal> {
@@ -249,6 +283,29 @@ export async function uploadDocumentApi(
   });
   if (!res.ok) {
     throw new Error(await parseApiError(res, "Gagal mengunggah dokumen"));
+  }
+  return res.json();
+}
+
+export async function updateDocumentAclApi(
+  token: string,
+  documentId: string,
+  allowedRoles: string[],
+  allowedUsers: string[]
+): Promise<DocumentItem> {
+  const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(documentId)}/acl`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      allowed_roles: allowedRoles,
+      allowed_users: allowedUsers,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(await parseApiError(res, "Gagal memperbarui ACL dokumen"));
   }
   return res.json();
 }
@@ -326,6 +383,53 @@ export async function fetchAdminUsers(token: string): Promise<AdminUserItem[]> {
   });
   if (!res.ok) {
     throw new Error(await parseApiError(res, "Gagal memuat daftar pengguna (Khusus Admin)"));
+  }
+  return res.json();
+}
+
+export async function createAdminUserApi(
+  token: string,
+  payload: {
+    username: string;
+    email: string;
+    password: string;
+    role: string;
+    explicit_permissions: string[];
+  }
+): Promise<AdminUserItem> {
+  const res = await fetch(`${API_BASE}/admin/users`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw new Error(await parseApiError(res, "Gagal membuat pengguna baru"));
+  }
+  return res.json();
+}
+
+export async function updateUserStatusApi(
+  token: string,
+  targetUserId: string,
+  isActive: boolean,
+  reason: string
+): Promise<{ user_id: string; is_active: boolean; reason: string }> {
+  const res = await fetch(`${API_BASE}/admin/users/${encodeURIComponent(targetUserId)}/status`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      is_active: isActive,
+      reason,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(await parseApiError(res, "Gagal memperbarui status akun pengguna"));
   }
   return res.json();
 }

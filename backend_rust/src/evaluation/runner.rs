@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::sync::Arc;
 
 use crate::core::enums::{GuardrailDecisionType, StatementClassification};
 use crate::rag::service::EnterpriseRAGService;
@@ -45,7 +45,11 @@ impl RAGEvaluationRunner {
         Self { rag_service }
     }
 
-    pub async fn run_case(&self, pool: &SqlitePool, case: &EvaluationTestCase) -> EvaluationCaseResult {
+    pub async fn run_case(
+        &self,
+        pool: &SqlitePool,
+        case: &EvaluationTestCase,
+    ) -> EvaluationCaseResult {
         let resp = match self
             .rag_service
             .query(pool, &case.principal, &case.question, None, false)
@@ -70,7 +74,10 @@ impl RAGEvaluationRunner {
         };
 
         let mut failures = Vec::new();
-        let was_blocked = resp.guardrail_decisions.iter().any(|g| g.decision == GuardrailDecisionType::Block);
+        let was_blocked = resp
+            .guardrail_decisions
+            .iter()
+            .any(|g| g.decision == GuardrailDecisionType::Block);
 
         if was_blocked != case.expected_blocked_by_guardrail {
             failures.push(format!(
@@ -96,7 +103,10 @@ impl RAGEvaluationRunner {
 
         for forb_sub in &case.forbidden_substrings_in_answer {
             if lower_ans.contains(&forb_sub.to_lowercase()) {
-                failures.push(format!("CRITICAL LEAKAGE: Forbidden substring found in answer: '{}'", forb_sub));
+                failures.push(format!(
+                    "CRITICAL LEAKAGE: Forbidden substring found in answer: '{}'",
+                    forb_sub
+                ));
             }
         }
 
@@ -104,7 +114,10 @@ impl RAGEvaluationRunner {
             failures.push("Expected at least 1 valid citation, but got 0".to_string());
         }
         if !case.require_valid_citation && !resp.citations.is_empty() {
-            failures.push(format!("Expected 0 citations for refusal/no-evidence, got {}", resp.citations.len()));
+            failures.push(format!(
+                "Expected 0 citations for refusal/no-evidence, got {}",
+                resp.citations.len()
+            ));
         }
 
         if case.expect_source_conflict != resp.has_source_conflict {
@@ -115,7 +128,13 @@ impl RAGEvaluationRunner {
         }
 
         let citation_precision = if !resp.citations.is_empty() {
-            let valid = resp.citations.iter().filter(|c| !c.document_id.is_empty() && !c.chunk_id.is_empty() && !c.excerpt.is_empty()).count();
+            let valid = resp
+                .citations
+                .iter()
+                .filter(|c| {
+                    !c.document_id.is_empty() && !c.chunk_id.is_empty() && !c.excerpt.is_empty()
+                })
+                .count();
             valid as f64 / resp.citations.len() as f64
         } else if !case.require_valid_citation {
             1.0
@@ -123,17 +142,24 @@ impl RAGEvaluationRunner {
             0.0
         };
 
-        let factual_claims: Vec<_> = resp.claims.iter().filter(|cl| {
-            matches!(
-                cl.classification,
-                StatementClassification::SourceFact
-                    | StatementClassification::ComputedFromSource
-                    | StatementClassification::PermittedInference
-            )
-        }).collect();
+        let factual_claims: Vec<_> = resp
+            .claims
+            .iter()
+            .filter(|cl| {
+                matches!(
+                    cl.classification,
+                    StatementClassification::SourceFact
+                        | StatementClassification::ComputedFromSource
+                        | StatementClassification::PermittedInference
+                )
+            })
+            .collect();
 
         let faithfulness = if !factual_claims.is_empty() {
-            let grounded = factual_claims.iter().filter(|cl| !cl.supporting_chunk_ids.is_empty()).count();
+            let grounded = factual_claims
+                .iter()
+                .filter(|cl| !cl.supporting_chunk_ids.is_empty())
+                .count();
             grounded as f64 / factual_claims.len() as f64
         } else if !case.require_valid_citation {
             1.0
@@ -158,7 +184,11 @@ impl RAGEvaluationRunner {
         }
     }
 
-    pub async fn run_suite(&self, pool: &SqlitePool, cases: &[EvaluationTestCase]) -> serde_json::Value {
+    pub async fn run_suite(
+        &self,
+        pool: &SqlitePool,
+        cases: &[EvaluationTestCase],
+    ) -> serde_json::Value {
         let mut results = Vec::new();
         for case in cases {
             let res = self.run_case(pool, case).await;
@@ -167,7 +197,11 @@ impl RAGEvaluationRunner {
 
         let total = results.len();
         let passed = results.iter().filter(|r| r.passed).count();
-        let pass_rate = if total > 0 { (passed as f64 / total as f64) * 100.0 } else { 0.0 };
+        let pass_rate = if total > 0 {
+            (passed as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
 
         let avg_faithfulness: f64 = if total > 0 {
             results.iter().map(|r| r.faithfulness_score).sum::<f64>() / total as f64

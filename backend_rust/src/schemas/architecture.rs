@@ -1,13 +1,14 @@
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use utoipa::ToSchema;
 
 use crate::core::enums::{
-    DocumentScope, GuardrailDecisionType, GuardrailStage, IngestionStatus,
-    StatementClassification, SupportedFileType, UserRole,
+    DocumentScope, GuardrailDecisionType, GuardrailStage, IngestionStatus, StatementClassification,
+    SupportedFileType, UserRole,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuthenticatedPrincipal {
     pub user_id: String,
     pub username: String,
@@ -70,7 +71,7 @@ pub struct VerifiedChunkContext {
     pub acl_verified_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CitationItem {
     pub document_id: String,
     pub title: String,
@@ -84,7 +85,7 @@ pub struct CitationItem {
     pub excerpt: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ClaimItem {
     pub statement: String,
     pub classification: StatementClassification,
@@ -93,7 +94,7 @@ pub struct ClaimItem {
     pub calculation_expression: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct GuardrailDecision {
     pub stage: GuardrailStage,
     pub decision: GuardrailDecisionType,
@@ -103,7 +104,7 @@ pub struct GuardrailDecision {
     pub triggered_patterns: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RAGQueryResponse {
     pub request_id: String,
     pub session_id: String,

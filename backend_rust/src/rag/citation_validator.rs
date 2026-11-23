@@ -42,8 +42,10 @@ impl CitationValidator {
         citations: &[CitationItem],
         verified_chunks: &[VerifiedChunkContext],
     ) -> Result<(), CitationValidationError> {
-        let chunk_map: HashMap<&str, &VerifiedChunkContext> =
-            verified_chunks.iter().map(|c| (c.chunk_id.as_str(), c)).collect();
+        let chunk_map: HashMap<&str, &VerifiedChunkContext> = verified_chunks
+            .iter()
+            .map(|c| (c.chunk_id.as_str(), c))
+            .collect();
 
         for cit in citations {
             let source_chunk = chunk_map
@@ -59,21 +61,36 @@ impl CitationValidator {
             }
 
             if cit.page_number != source_chunk.provenance.page_number {
-                return Err(CitationValidationError::PageNumberMismatch(cit.chunk_id.clone()));
+                return Err(CitationValidationError::PageNumberMismatch(
+                    cit.chunk_id.clone(),
+                ));
             }
 
             if cit.sheet_name != source_chunk.provenance.sheet_name {
-                return Err(CitationValidationError::SheetNameMismatch(cit.chunk_id.clone()));
+                return Err(CitationValidationError::SheetNameMismatch(
+                    cit.chunk_id.clone(),
+                ));
             }
 
-            if cit.row_start != source_chunk.provenance.row_start || cit.row_end != source_chunk.provenance.row_end {
-                return Err(CitationValidationError::RowRangeMismatch(cit.chunk_id.clone()));
+            if cit.row_start != source_chunk.provenance.row_start
+                || cit.row_end != source_chunk.provenance.row_end
+            {
+                return Err(CitationValidationError::RowRangeMismatch(
+                    cit.chunk_id.clone(),
+                ));
             }
 
-            let parts: Vec<&str> = cit.excerpt.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let parts: Vec<&str> = cit
+                .excerpt
+                .split('|')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             for part in parts {
                 if !source_chunk.text_content.contains(part) {
-                    return Err(CitationValidationError::ExcerptNotFound(cit.chunk_id.clone()));
+                    return Err(CitationValidationError::ExcerptNotFound(
+                        cit.chunk_id.clone(),
+                    ));
                 }
             }
         }
@@ -90,7 +107,9 @@ impl CitationValidator {
                     }
                     for cid in &claim.supporting_chunk_ids {
                         if !chunk_map.contains_key(cid.as_str()) {
-                            return Err(CitationValidationError::UnverifiedSupportingChunk(cid.clone()));
+                            return Err(CitationValidationError::UnverifiedSupportingChunk(
+                                cid.clone(),
+                            ));
                         }
                     }
                 }
@@ -98,7 +117,12 @@ impl CitationValidator {
             }
 
             if claim.classification == StatementClassification::ComputedFromSource
-                && claim.calculation_expression.as_deref().unwrap_or("").trim().is_empty()
+                && claim
+                    .calculation_expression
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
             {
                 return Err(CitationValidationError::MissingCalculationExpression);
             }

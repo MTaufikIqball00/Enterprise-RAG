@@ -10,10 +10,9 @@ echo ===========================================================================
 echo   MENGHENTIKAN LAYANAN ENTERPRISE RAG (PORT %BACKEND_PORT% ^& PORT %FRONTEND_PORT%)
 echo ============================================================================
 
-:: PENGAMAN: hanya hentikan proses backend_rust.exe / python.exe / node.exe pada port milik proyek.
+:: PENGAMAN: hanya hentikan proses backend_rust.exe / node.exe pada port milik proyek.
 :: Proses sistem (mis. svchost.exe) TIDAK akan pernah dihentikan.
 call :stop_port %BACKEND_PORT% backend_rust.exe "Backend Rust API"
-call :stop_port %BACKEND_PORT% python.exe "Backend Python API"
 call :stop_port %FRONTEND_PORT% node.exe "Frontend UI"
 
 :: Hentikan backend_rust.exe bila masih berjalan
@@ -21,7 +20,6 @@ taskkill /IM backend_rust.exe /F >nul 2>&1
 
 :: Tutup jendela command prompt launcher jika masih terbuka
 taskkill /FI "WINDOWTITLE eq Enterprise RAG - Backend Rust*" /F >nul 2>&1
-taskkill /FI "WINDOWTITLE eq Enterprise RAG - Backend API*" /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq Enterprise RAG - Frontend UI*" /F >nul 2>&1
 
 echo.

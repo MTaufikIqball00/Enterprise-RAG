@@ -97,9 +97,9 @@ pub struct AuditLogRecord {
     pub resource_type: String,
     pub resource_id: Option<String>,
     pub authz_decision: String,
-    pub guardrail_decisions: String,    // JSON array string
-    pub accessed_document_ids: String,  // JSON array string
-    pub retrieval_scores: String,       // JSON array string
+    pub guardrail_decisions: String,   // JSON array string
+    pub accessed_document_ids: String, // JSON array string
+    pub retrieval_scores: String,      // JSON array string
     pub retrieval_config_version: Option<String>,
     pub llm_provider: Option<String>,
     pub llm_model: Option<String>,
@@ -108,5 +108,5 @@ pub struct AuditLogRecord {
     pub completion_tokens: Option<i64>,
     pub pipeline_status: String,
     pub error_code: Option<String>,
-    pub metadata_json: String,          // JSON object string
+    pub metadata_json: String, // JSON object string
 }

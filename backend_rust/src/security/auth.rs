@@ -1,4 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     async_trait,
     extract::FromRequestParts,
@@ -10,6 +9,7 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 
 use crate::core::config::Settings;
@@ -36,7 +36,10 @@ pub fn hash_password(plain_password: &str) -> Result<String, String> {
     );
     let derived_hex = hex::encode(derived);
 
-    Ok(format!("pbkdf2_sha256${}${}${}", PBKDF2_ITERATIONS, salt, derived_hex))
+    Ok(format!(
+        "pbkdf2_sha256${}${}${}",
+        PBKDF2_ITERATIONS, salt, derived_hex
+    ))
 }
 
 pub fn verify_password(plain_password: &str, stored_hash: &str) -> bool {
@@ -63,7 +66,10 @@ pub fn verify_password(plain_password: &str, stored_hash: &str) -> bool {
     );
     let candidate_hex = hex::encode(derived);
 
-    candidate_hex.as_bytes().ct_eq(expected_hex.as_bytes()).into()
+    candidate_hex
+        .as_bytes()
+        .ct_eq(expected_hex.as_bytes())
+        .into()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,6 +80,13 @@ pub struct Claims {
     pub iat: i64,
     pub exp: i64,
     pub jti: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthenticatedSession {
+    pub principal: AuthenticatedPrincipal,
+    pub jti: String,
+    pub exp: i64,
 }
 
 pub fn create_access_token(user: &UserRecord, settings: &Settings) -> Result<String, String> {
@@ -104,7 +117,10 @@ pub fn create_access_token(user: &UserRecord, settings: &Settings) -> Result<Str
     .map_err(|e| e.to_string())
 }
 
-pub fn decode_access_token(token: &str, settings: &Settings) -> Result<Claims, (StatusCode, &'static str)> {
+pub fn decode_access_token(
+    token: &str,
+    settings: &Settings,
+) -> Result<Claims, (StatusCode, &'static str)> {
     let mut validation = Validation::default();
     validation.validate_exp = true;
 
@@ -121,6 +137,45 @@ pub fn decode_access_token(token: &str, settings: &Settings) -> Result<Claims, (
             _ => Err((StatusCode::UNAUTHORIZED, "Token autentikasi tidak valid.")),
         },
     }
+}
+
+pub async fn is_token_revoked(pool: &SqlitePool, jti: &str) -> Result<bool, sqlx::Error> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT jti FROM revoked_tokens WHERE jti = ? LIMIT 1")
+            .bind(jti)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.is_some())
+}
+
+pub async fn revoke_token(
+    pool: &SqlitePool,
+    jti: &str,
+    user_id: &str,
+    expires_at: i64,
+) -> Result<(), sqlx::Error> {
+    let now_str = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT OR IGNORE INTO revoked_tokens (jti, user_id, expires_at, revoked_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(jti)
+    .bind(user_id)
+    .bind(expires_at)
+    .bind(&now_str)
+    .execute(pool)
+    .await?;
+
+    // Opportunistically clean up expired revoked tokens
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let _ = sqlx::query("DELETE FROM revoked_tokens WHERE expires_at < ?")
+        .bind(now_unix)
+        .execute(pool)
+        .await;
+
+    Ok(())
 }
 
 pub async fn authenticate_user(
@@ -157,17 +212,25 @@ pub async fn resolve_principal_from_db(
     .fetch_optional(pool)
     .await
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
-    .ok_or((StatusCode::UNAUTHORIZED, "Identitas pengguna tidak ditemukan atau tidak aktif."))?;
+    .ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Identitas pengguna tidak ditemukan atau tidak aktif.",
+    ))?;
 
     if !user.is_active {
-        return Err((StatusCode::UNAUTHORIZED, "Identitas pengguna tidak ditemukan atau tidak aktif."));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Identitas pengguna tidak ditemukan atau tidak aktif.",
+        ));
     }
 
-    let role = UserRole::from_str_opt(&user.role)
-        .ok_or((StatusCode::FORBIDDEN, "Role pengguna tidak dikenali oleh kebijakan keamanan."))?;
+    let role = UserRole::from_str_opt(&user.role).ok_or((
+        StatusCode::FORBIDDEN,
+        "Role pengguna tidak dikenali oleh kebijakan keamanan.",
+    ))?;
 
-    let explicit_permissions: Vec<String> = serde_json::from_str(&user.explicit_permissions)
-        .unwrap_or_default();
+    let explicit_permissions: Vec<String> =
+        serde_json::from_str(&user.explicit_permissions).unwrap_or_default();
 
     Ok(AuthenticatedPrincipal {
         user_id: user.id,
@@ -179,7 +242,100 @@ pub async fn resolve_principal_from_db(
     })
 }
 
-// Axum custom extractor for AuthenticatedPrincipal
+async fn extract_session_from_parts(parts: &Parts) -> Result<AuthenticatedSession, Box<Response>> {
+    let auth_header = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    let token = match auth_header {
+        Some(h) if h.starts_with("Bearer ") => &h[7..],
+        _ => {
+            return Err(Box::new(
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "detail": "Autentikasi diperlukan (Bearer token tidak ditemukan)."
+                    })),
+                )
+                    .into_response(),
+            ));
+        }
+    };
+
+    let settings = parts.extensions.get::<Settings>().ok_or_else(|| {
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "detail": "Missing settings extension" })),
+            )
+                .into_response(),
+        )
+    })?;
+
+    let pool = parts.extensions.get::<SqlitePool>().ok_or_else(|| {
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "detail": "Missing database pool extension" })),
+            )
+                .into_response(),
+        )
+    })?;
+
+    let claims = decode_access_token(token, settings).map_err(|(code, msg)| {
+        Box::new((code, Json(serde_json::json!({ "detail": msg }))).into_response())
+    })?;
+
+    match is_token_revoked(pool, &claims.jti).await {
+        Ok(true) => {
+            return Err(Box::new(
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "detail": "Token autentikasi telah dicabut (sesi sudah logout)."
+                    })),
+                )
+                    .into_response(),
+            ));
+        }
+        Err(_) => {
+            return Err(Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "detail": "Gagal memverifikasi status revokasi token." })),
+                )
+                    .into_response(),
+            ));
+        }
+        Ok(false) => {}
+    }
+
+    let principal = resolve_principal_from_db(pool, &claims.sub)
+        .await
+        .map_err(|(code, msg)| {
+            Box::new((code, Json(serde_json::json!({ "detail": msg }))).into_response())
+        })?;
+
+    Ok(AuthenticatedSession {
+        principal,
+        jti: claims.jti,
+        exp: claims.exp,
+    })
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for AuthenticatedSession
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        extract_session_from_parts(parts).await.map_err(|e| *e)
+    }
+}
+
 #[async_trait]
 impl<S> FromRequestParts<S> for AuthenticatedPrincipal
 where
@@ -188,57 +344,9 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-
-        let token = match auth_header {
-            Some(h) if h.starts_with("Bearer ") => &h[7..],
-            _ => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "detail": "Autentikasi diperlukan (Bearer token tidak ditemukan)."
-                    })),
-                )
-                    .into_response());
-            }
-        };
-
-        // Extract settings and pool from request extensions
-        let settings = parts
-            .extensions
-            .get::<Settings>()
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "detail": "Missing settings extension" })),
-                )
-                    .into_response()
-            })?;
-
-        let pool = parts
-            .extensions
-            .get::<SqlitePool>()
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "detail": "Missing database pool extension" })),
-                )
-                    .into_response()
-            })?;
-
-        let claims = decode_access_token(token, settings).map_err(|(code, msg)| {
-            (code, Json(serde_json::json!({ "detail": msg }))).into_response()
-        })?;
-
-        let principal = resolve_principal_from_db(pool, &claims.sub)
+        extract_session_from_parts(parts)
             .await
-            .map_err(|(code, msg)| {
-                (code, Json(serde_json::json!({ "detail": msg }))).into_response()
-            })?;
-
-        Ok(principal)
+            .map(|session| session.principal)
+            .map_err(|e| *e)
     }
 }

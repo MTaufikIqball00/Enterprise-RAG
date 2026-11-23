@@ -1,6 +1,6 @@
+use calamine::{Data, Reader, Xlsx};
 use std::io::{Cursor, Read};
 use std::path::Path;
-use calamine::{Data, Reader, Xlsx};
 use thiserror::Error;
 
 use crate::core::enums::SupportedFileType;
@@ -81,7 +81,10 @@ pub fn detect_and_validate_file_type(
         return Err(DocumentParseError::EmptyFile);
     }
     if raw_bytes.len() > max_size_bytes {
-        return Err(DocumentParseError::FileTooLarge(raw_bytes.len(), max_size_bytes));
+        return Err(DocumentParseError::FileTooLarge(
+            raw_bytes.len(),
+            max_size_bytes,
+        ));
     }
 
     let ext = Path::new(filename)
@@ -105,13 +108,18 @@ pub fn detect_and_validate_file_type(
     if (file_type == SupportedFileType::Docx || file_type == SupportedFileType::Xlsx)
         && !raw_bytes.starts_with(b"PK\x03\x04")
     {
-        return Err(DocumentParseError::InvalidZipMagic(file_type.as_str().to_uppercase()));
+        return Err(DocumentParseError::InvalidZipMagic(
+            file_type.as_str().to_uppercase(),
+        ));
     }
 
     Ok(file_type)
 }
 
-pub fn parse_csv_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec<ParsedSegment>, DocumentParseError> {
+pub fn parse_csv_bytes(
+    raw_bytes: &[u8],
+    rows_per_segment: usize,
+) -> Result<Vec<ParsedSegment>, DocumentParseError> {
     let decoded = match std::str::from_utf8(raw_bytes) {
         Ok(s) => s.trim_start_matches('\u{feff}').to_string(),
         Err(_) => raw_bytes.iter().map(|&b| b as char).collect::<String>(),
@@ -139,7 +147,13 @@ pub fn parse_csv_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec<
     let headers: Vec<String> = raw_headers
         .iter()
         .enumerate()
-        .map(|(i, h)| if !h.is_empty() { h.clone() } else { format!("Column_{}", i + 1) })
+        .map(|(i, h)| {
+            if !h.is_empty() {
+                h.clone()
+            } else {
+                format!("Column_{}", i + 1)
+            }
+        })
         .collect();
 
     let data_rows = &all_rows[1..];
@@ -155,7 +169,11 @@ pub fn parse_csv_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec<
     }
 
     let mut segments = Vec::new();
-    let step = if rows_per_segment == 0 { 20 } else { rows_per_segment };
+    let step = if rows_per_segment == 0 {
+        20
+    } else {
+        rows_per_segment
+    };
 
     for chunk in data_rows.chunks(step) {
         let row_start_num = chunk[0].0 as i64;
@@ -172,7 +190,11 @@ pub fn parse_csv_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec<
             let mut pairs = Vec::new();
             for (i, val) in row_vals.iter().enumerate() {
                 if !val.is_empty() {
-                    let col_name = if i < headers.len() { &headers[i] } else { &format!("Column_{}", i + 1) };
+                    let col_name = if i < headers.len() {
+                        &headers[i]
+                    } else {
+                        &format!("Column_{}", i + 1)
+                    };
                     pairs.push(format!("{}={}", col_name, val));
                 }
             }
@@ -208,10 +230,13 @@ fn infer_value_type(val: &Data) -> &'static str {
     }
 }
 
-pub fn parse_xlsx_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec<ParsedSegment>, DocumentParseError> {
+pub fn parse_xlsx_bytes(
+    raw_bytes: &[u8],
+    rows_per_segment: usize,
+) -> Result<Vec<ParsedSegment>, DocumentParseError> {
     let cursor = Cursor::new(raw_bytes);
-    let mut workbook: Xlsx<_> = Xlsx::new(cursor)
-        .map_err(|e| DocumentParseError::XlsxCorrupt(e.to_string()))?;
+    let mut workbook: Xlsx<_> =
+        Xlsx::new(cursor).map_err(|e| DocumentParseError::XlsxCorrupt(e.to_string()))?;
 
     let sheet_names = workbook.sheet_names().to_vec();
     let mut segments = Vec::new();
@@ -235,7 +260,11 @@ pub fn parse_xlsx_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec
                 .enumerate()
                 .map(|(i, h)| {
                     let s = h.to_string().trim().to_string();
-                    if !s.is_empty() { s } else { format!("Column_{}", i + 1) }
+                    if !s.is_empty() {
+                        s
+                    } else {
+                        format!("Column_{}", i + 1)
+                    }
                 })
                 .collect();
 
@@ -252,7 +281,11 @@ pub fn parse_xlsx_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec
                 continue;
             }
 
-            let step = if rows_per_segment == 0 { 15 } else { rows_per_segment };
+            let step = if rows_per_segment == 0 {
+                15
+            } else {
+                rows_per_segment
+            };
             for chunk in data_rows.chunks(step) {
                 let row_start_num = chunk[0].0 as i64;
                 let row_end_num = chunk.last().unwrap().0 as i64;
@@ -271,7 +304,11 @@ pub fn parse_xlsx_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec
                         if matches!(cell_val, Data::Empty) {
                             continue;
                         }
-                        let col_name = if col_idx < headers.len() { &headers[col_idx] } else { &format!("Column_{}", col_idx + 1) };
+                        let col_name = if col_idx < headers.len() {
+                            &headers[col_idx]
+                        } else {
+                            &format!("Column_{}", col_idx + 1)
+                        };
                         let val_type = infer_value_type(cell_val);
                         col_descriptions.push(format!("{}={} ({})", col_name, cell_val, val_type));
                     }
@@ -291,7 +328,10 @@ pub fn parse_xlsx_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec
                     sheet_name: Some(sheet_name.clone()),
                     row_start: Some(row_start_num),
                     row_end: Some(row_end_num),
-                    section_label: Some(format!("Sheet {} (Rows {}-{})", sheet_name, row_start_num, row_end_num)),
+                    section_label: Some(format!(
+                        "Sheet {} (Rows {}-{})",
+                        sheet_name, row_start_num, row_end_num
+                    )),
                 });
             }
         }
@@ -306,23 +346,24 @@ pub fn parse_xlsx_bytes(raw_bytes: &[u8], rows_per_segment: usize) -> Result<Vec
 
 pub fn parse_docx_bytes(raw_bytes: &[u8]) -> Result<Vec<ParsedSegment>, DocumentParseError> {
     let cursor = Cursor::new(raw_bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| DocumentParseError::DocxCorrupt(e.to_string()))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| DocumentParseError::DocxCorrupt(e.to_string()))?;
 
     let mut doc_xml = String::new();
     {
-        let mut file = archive
-            .by_name("word/document.xml")
-            .map_err(|e| DocumentParseError::DocxCorrupt(format!("document.xml not found: {}", e)))?;
+        let mut file = archive.by_name("word/document.xml").map_err(|e| {
+            DocumentParseError::DocxCorrupt(format!("document.xml not found: {}", e))
+        })?;
         file.read_to_string(&mut doc_xml)
             .map_err(|e| DocumentParseError::DocxCorrupt(e.to_string()))?;
     }
 
-    // Extract text from XML nodes: <w:p> paragraphs and <w:tbl> tables
+    // Extract text from XML nodes: <w:p> paragraphs and structured <w:tbl> tables
     let mut segments = Vec::new();
     let mut current_section = "Document Body".to_string();
-    let mut para_buffer = Vec::new();
-    let mut para_group_idx = 1;
+    let mut para_buffer: Vec<String> = Vec::new();
+    let mut para_group_idx = 1usize;
+    let mut table_idx = 0usize;
 
     let mut reader = quick_xml::Reader::from_str(&doc_xml);
     reader.config_mut().trim_text(true);
@@ -331,26 +372,76 @@ pub fn parse_docx_bytes(raw_bytes: &[u8]) -> Result<Vec<ParsedSegment>, Document
     let mut is_heading = false;
     let mut p_text = String::new();
 
+    // Table parsing state (supports nested table depth tracking)
+    let mut tbl_depth = 0usize;
+    let mut in_tc = false;
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut current_row: Vec<String> = Vec::new();
+    let mut current_cell_paras: Vec<String> = Vec::new();
+
     let mut buf = Vec::new();
+
+    let flush_para_buffer = |segments: &mut Vec<ParsedSegment>,
+                             para_buffer: &mut Vec<String>,
+                             current_section: &str,
+                             para_group_idx: &mut usize| {
+        if !para_buffer.is_empty() {
+            segments.push(ParsedSegment {
+                text: para_buffer.join("\n"),
+                page_number: None,
+                sheet_name: None,
+                row_start: None,
+                row_end: None,
+                section_label: Some(format!("{} (Part {})", current_section, *para_group_idx)),
+            });
+            para_buffer.clear();
+            *para_group_idx += 1;
+        }
+    };
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref e)) => {
                 let name = e.name();
-                if name.as_ref() == b"w:p" {
-                    p_text.clear();
-                    is_heading = false;
-                } else if name.as_ref() == b"w:t" {
-                    in_t = true;
-                } else if name.as_ref() == b"w:pStyle" {
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"w:val" {
-                            let val = String::from_utf8_lossy(&attr.value).to_lowercase();
-                            if val.starts_with("heading") {
-                                is_heading = true;
+                match name.as_ref() {
+                    b"w:tbl" => {
+                        if tbl_depth == 0 {
+                            flush_para_buffer(
+                                &mut segments,
+                                &mut para_buffer,
+                                &current_section,
+                                &mut para_group_idx,
+                            );
+                            table_rows.clear();
+                            table_idx += 1;
+                        }
+                        tbl_depth += 1;
+                    }
+                    b"w:tr" if tbl_depth == 1 => {
+                        current_row.clear();
+                    }
+                    b"w:tc" if tbl_depth == 1 => {
+                        in_tc = true;
+                        current_cell_paras.clear();
+                    }
+                    b"w:p" => {
+                        p_text.clear();
+                        is_heading = false;
+                    }
+                    b"w:t" => {
+                        in_t = true;
+                    }
+                    b"w:pStyle" => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"w:val" {
+                                let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                if val.starts_with("heading") {
+                                    is_heading = true;
+                                }
                             }
                         }
                     }
+                    _ => {}
                 }
             }
             Ok(quick_xml::events::Event::Empty(ref e)) => {
@@ -377,28 +468,125 @@ pub fn parse_docx_bytes(raw_bytes: &[u8]) -> Result<Vec<ParsedSegment>, Document
             }
             Ok(quick_xml::events::Event::End(ref e)) => {
                 let name = e.name();
-                if name.as_ref() == b"w:t" {
-                    in_t = false;
-                } else if name.as_ref() == b"w:p" {
-                    let trimmed = p_text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        if is_heading {
-                            if !para_buffer.is_empty() {
-                                segments.push(ParsedSegment {
-                                    text: para_buffer.join("\n"),
-                                    page_number: None,
-                                    sheet_name: None,
-                                    row_start: None,
-                                    row_end: None,
-                                    section_label: Some(format!("{} (Part {})", current_section, para_group_idx)),
-                                });
-                                para_buffer.clear();
-                                para_group_idx += 1;
-                            }
-                            current_section = trimmed.clone();
-                        }
-                        para_buffer.push(trimmed);
+                match name.as_ref() {
+                    b"w:t" => {
+                        in_t = false;
                     }
+                    b"w:p" => {
+                        let trimmed = p_text.trim().to_string();
+                        if !trimmed.is_empty() {
+                            if tbl_depth > 0 && in_tc {
+                                current_cell_paras.push(trimmed);
+                            } else if tbl_depth == 0 {
+                                if is_heading {
+                                    flush_para_buffer(
+                                        &mut segments,
+                                        &mut para_buffer,
+                                        &current_section,
+                                        &mut para_group_idx,
+                                    );
+                                    current_section = trimmed.clone();
+                                }
+                                para_buffer.push(trimmed);
+                            }
+                        }
+                        p_text.clear();
+                    }
+                    b"w:tc" if tbl_depth == 1 => {
+                        let cell_text = current_cell_paras.join(" ").trim().to_string();
+                        current_row.push(cell_text);
+                        current_cell_paras.clear();
+                        in_tc = false;
+                    }
+                    b"w:tr" if tbl_depth == 1 => {
+                        if current_row.iter().any(|c| !c.is_empty()) {
+                            table_rows.push(current_row.clone());
+                        }
+                        current_row.clear();
+                    }
+                    b"w:tbl" => {
+                        if tbl_depth == 1 && !table_rows.is_empty() {
+                            let raw_headers = &table_rows[0];
+                            let headers: Vec<String> = raw_headers
+                                .iter()
+                                .enumerate()
+                                .map(|(i, h)| {
+                                    if !h.is_empty() {
+                                        h.replace(' ', "_")
+                                    } else {
+                                        format!("Column_{}", i + 1)
+                                    }
+                                })
+                                .collect();
+
+                            let data_rows = &table_rows[1..];
+                            if data_rows.is_empty() {
+                                segments.push(ParsedSegment {
+                                    text: format!(
+                                        "[DOCX Tabel {} | Header: {}]",
+                                        table_idx,
+                                        headers.join(" | ")
+                                    ),
+                                    page_number: None,
+                                    sheet_name: Some(format!("DOCX_Table_{}", table_idx)),
+                                    row_start: Some(1),
+                                    row_end: Some(1),
+                                    section_label: Some(format!(
+                                        "{} - Table {}",
+                                        current_section, table_idx
+                                    )),
+                                });
+                            } else {
+                                let row_start_num = 2i64;
+                                let row_end_num = (data_rows.len() + 1) as i64;
+                                let mut lines = vec![format!(
+                                    "[DOCX Tabel {} | Kolom Header: {} | Baris {}-{}]",
+                                    table_idx,
+                                    headers.join(" | "),
+                                    row_start_num,
+                                    row_end_num
+                                )];
+
+                                for (idx, r_vals) in data_rows.iter().enumerate() {
+                                    let row_num = (idx + 2) as i64;
+                                    let mut pairs = Vec::new();
+                                    for (c_idx, val) in r_vals.iter().enumerate() {
+                                        if !val.is_empty() {
+                                            let col_name = if c_idx < headers.len() {
+                                                headers[c_idx].clone()
+                                            } else {
+                                                format!("Column_{}", c_idx + 1)
+                                            };
+                                            pairs.push(format!("{}={}", col_name, val));
+                                        }
+                                    }
+                                    if !pairs.is_empty() {
+                                        lines.push(format!(
+                                            "Tabel {} Baris {}: {}",
+                                            table_idx,
+                                            row_num,
+                                            pairs.join("; ")
+                                        ));
+                                    }
+                                }
+
+                                segments.push(ParsedSegment {
+                                    text: lines.join("\n"),
+                                    page_number: None,
+                                    sheet_name: Some(format!("DOCX_Table_{}", table_idx)),
+                                    row_start: Some(row_start_num),
+                                    row_end: Some(row_end_num),
+                                    section_label: Some(format!(
+                                        "{} - Table {}",
+                                        current_section, table_idx
+                                    )),
+                                });
+                            }
+                            table_rows.clear();
+                        }
+                        tbl_depth = tbl_depth.saturating_sub(1);
+                    }
+                    _ => {}
                 }
             }
             Ok(quick_xml::events::Event::Eof) => break,
@@ -408,16 +596,12 @@ pub fn parse_docx_bytes(raw_bytes: &[u8]) -> Result<Vec<ParsedSegment>, Document
         buf.clear();
     }
 
-    if !para_buffer.is_empty() {
-        segments.push(ParsedSegment {
-            text: para_buffer.join("\n"),
-            page_number: None,
-            sheet_name: None,
-            row_start: None,
-            row_end: None,
-            section_label: Some(format!("{} (Part {})", current_section, para_group_idx)),
-        });
-    }
+    flush_para_buffer(
+        &mut segments,
+        &mut para_buffer,
+        &current_section,
+        &mut para_group_idx,
+    );
 
     if segments.is_empty() {
         return Err(DocumentParseError::DocxEmpty);

@@ -2,8 +2,7 @@ use chrono::Utc;
 use std::sync::Arc;
 
 use backend_rust::core::enums::{
-    DocumentScope, GuardrailDecisionType, StatementClassification,
-    SupportedFileType, UserRole,
+    DocumentScope, GuardrailDecisionType, StatementClassification, SupportedFileType, UserRole,
 };
 use backend_rust::db::models::DocumentRecord;
 use backend_rust::guardrails::engine::GuardrailsEngine;
@@ -205,7 +204,8 @@ fn test_output_guardrail_credential_leakage() {
     assert_eq!(decision.rule_id, "OUT-001");
     assert!(!sanitized.contains("pbkdf2_sha256"));
 
-    let normal_output = "Berdasarkan pedoman umum karyawan, jam kerja adalah pukul 08:30 hingga 17:30 WIB.";
+    let normal_output =
+        "Berdasarkan pedoman umum karyawan, jam kerja adalah pukul 08:30 hingga 17:30 WIB.";
     let (clean_text, decision) = GuardrailsEngine::validate_output(normal_output);
     assert_eq!(decision.decision, GuardrailDecisionType::Allow);
     assert_eq!(clean_text, normal_output);
@@ -239,7 +239,9 @@ fn test_retrieval_guardrail_indirect_injection() {
     let (sanitized, decision) = GuardrailsEngine::sanitize_retrieved_chunks(vec![chunk]);
     assert_eq!(decision.decision, GuardrailDecisionType::Redact);
     assert_eq!(decision.rule_id, "RET-001");
-    assert!(sanitized[0].text_content.contains("[REDACTED_UNTRUSTED_DOCUMENT_INSTRUCTION]"));
+    assert!(sanitized[0]
+        .text_content
+        .contains("[REDACTED_UNTRUSTED_DOCUMENT_INSTRUCTION]"));
     assert!(!sanitized[0].text_content.contains("grant admin access"));
 }
 
@@ -380,7 +382,8 @@ fn test_citation_validator() {
     let chunk = VerifiedChunkContext {
         chunk_id: "chk-001".to_string(),
         document_id: "doc-001".to_string(),
-        text_content: "Karyawan berhak atas cuti melahirkan selama 3 bulan kalender penuh.".to_string(),
+        text_content: "Karyawan berhak atas cuti melahirkan selama 3 bulan kalender penuh."
+            .to_string(),
         relevance_score: 0.95,
         provenance: provenance.clone(),
         acl_verified_at: Utc::now(),
@@ -420,9 +423,9 @@ fn test_citation_validator() {
     };
 
     let valid_check = CitationValidator::validate_citations_and_claims(
-        &[valid_claim.clone()],
+        std::slice::from_ref(&valid_claim),
         &[valid_citation],
-        &[chunk.clone()],
+        std::slice::from_ref(&chunk),
     );
     assert!(valid_check.is_ok(), "Expected valid citation to pass");
 
@@ -431,5 +434,213 @@ fn test_citation_validator() {
         &[invalid_citation],
         &[chunk],
     );
-    assert!(invalid_check.is_err(), "Expected fabricated quote to fail validation");
+    assert!(
+        invalid_check.is_err(),
+        "Expected fabricated quote to fail validation"
+    );
+}
+
+#[test]
+fn test_settings_validation_rejects_insecure_production_secret() {
+    let mut cfg = backend_rust::core::config::Settings::from_env();
+    cfg.app_env = "production".to_string();
+    cfg.jwt_secret_key = backend_rust::core::config::DEFAULT_INSECURE_JWT_SECRET.to_string();
+    assert!(
+        cfg.validate().is_err(),
+        "Production must reject default placeholder JWT secret"
+    );
+
+    cfg.jwt_secret_key = "short_secret".to_string();
+    assert!(
+        cfg.validate().is_err(),
+        "Production must reject JWT secret shorter than 32 bytes"
+    );
+
+    cfg.jwt_secret_key = "a_very_secure_production_secret_key_with_more_than_32_bytes!".to_string();
+    assert!(
+        cfg.validate().is_ok(),
+        "Production must accept strong 32+ byte non-placeholder secret"
+    );
+}
+
+#[test]
+fn test_output_guardrail_expanded_secrets_and_pii() {
+    let leaks = vec![
+        "Kunci Gemini: AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe",
+        "Token sesi: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3ItMSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA",
+        "Data sensitif NIK: 3273011205900001 milik karyawan",
+    ];
+    for leak in leaks {
+        let (out, dec) = GuardrailsEngine::validate_output(leak);
+        assert_eq!(
+            dec.decision,
+            GuardrailDecisionType::Block,
+            "Should block: {}",
+            leak
+        );
+        assert_eq!(dec.rule_id, "OUT-001");
+        assert!(!out.contains("AIza"));
+        assert!(!out.contains("eyJhbGci"));
+        assert!(!out.contains("PRIVATE KEY"));
+        assert!(!out.contains("3273011205900001"));
+    }
+}
+
+#[test]
+fn test_tool_guardrail_safe_arithmetic_aggregator() {
+    let allow = GuardrailsEngine::validate_tool_execution("safe_arithmetic_aggregator", false);
+    assert_eq!(allow.decision, GuardrailDecisionType::Allow);
+    assert_eq!(allow.rule_id, "TOOL-PASS");
+
+    let block_doc = GuardrailsEngine::validate_tool_execution("safe_arithmetic_aggregator", true);
+    assert_eq!(block_doc.decision, GuardrailDecisionType::Block);
+    assert_eq!(block_doc.rule_id, "TOOL-001");
+
+    let block_unknown = GuardrailsEngine::validate_tool_execution("shell_exec", false);
+    assert_eq!(block_unknown.decision, GuardrailDecisionType::Block);
+    assert_eq!(block_unknown.rule_id, "TOOL-002");
+}
+
+#[test]
+fn test_docx_table_parser_and_heading_extraction() {
+    let docx_bytes = backend_rust::api::routes::build_synthetic_docx_bytes(
+        "Anggaran Perangkat IT",
+        &["Kode", "Item", "Harga_IDR"],
+        &[
+            &["IT-01", "Laptop_Standar", "15000000"],
+            &["IT-02", "Monitor_27", "4500000"],
+        ],
+    );
+    let segments = backend_rust::ingestion::parsers::parse_docx_bytes(&docx_bytes)
+        .expect("DOCX with table should parse cleanly");
+    assert!(
+        segments.len() >= 2,
+        "Expected heading paragraph + structured table segment"
+    );
+    let table_seg = segments
+        .iter()
+        .find(|s| s.text.contains("DOCX Tabel 1"))
+        .expect("Table segment must exist");
+    assert!(table_seg
+        .text
+        .contains("Kolom Header: Kode | Item | Harga_IDR"));
+    assert!(table_seg
+        .text
+        .contains("Item=Laptop_Standar; Harga_IDR=15000000"));
+    assert!(table_seg
+        .section_label
+        .as_deref()
+        .unwrap_or("")
+        .contains("Anggaran Perangkat IT"));
+}
+
+#[test]
+fn test_smart_chunker_word_boundaries_and_sticky_headers() {
+    let header = "[CSV | Kolom Header: Akun | Pos | Nilai | Baris 2-10]";
+    let rows: Vec<String> = (2..=10)
+        .map(|i| {
+            format!(
+                "CSV Baris {}: Akun=FIN-{}; Pos=Pengeluaran_Operasional_Divisi_{}; Nilai={}",
+                i,
+                i,
+                i,
+                i * 1000
+            )
+        })
+        .collect();
+    let seg = backend_rust::ingestion::parsers::ParsedSegment {
+        text: format!("{}\n{}", header, rows.join("\n")),
+        page_number: None,
+        sheet_name: Some("CSV".to_string()),
+        row_start: Some(2),
+        row_end: Some(10),
+        section_label: Some("CSV Rows 2-10".to_string()),
+    };
+    let chunks = backend_rust::ingestion::chunker::chunk_parsed_segments(&[seg], 220, 40)
+        .expect("Chunking should succeed");
+    assert!(chunks.len() >= 2, "Expected multiple tabular chunks");
+    for c in &chunks {
+        assert!(
+            c.text_content.starts_with(header),
+            "Every continuation chunk must retain CSV header, got: {}",
+            c.text_content
+        );
+    }
+
+    // Prose word boundary check: ensure numbers/words are never split mid-token
+    let prose_seg = backend_rust::ingestion::parsers::ParsedSegment {
+        text: "Kebijakan operasional perusahaan menetapkan standar kompensasi sebesar 15000000 rupiah untuk seluruh karyawan tetap yang telah menyelesaikan masa percobaan selama tiga bulan penuh.".to_string(),
+        page_number: Some(1),
+        sheet_name: None,
+        row_start: None,
+        row_end: None,
+        section_label: Some("Page 1".to_string()),
+    };
+    let prose_chunks =
+        backend_rust::ingestion::chunker::chunk_parsed_segments(&[prose_seg], 90, 20)
+            .expect("Prose chunking should succeed");
+    assert!(prose_chunks.len() >= 2);
+    assert!(
+        prose_chunks
+            .iter()
+            .any(|c| c.text_content.contains("15000000")),
+        "Number 15000000 must never be split in half across chunks"
+    );
+}
+
+#[test]
+fn test_rbac_strict_owner_and_explicit_permissions() {
+    let doc = DocumentRecord {
+        document_id: "doc-hr-owner".to_string(),
+        title: "Dokumen HR".to_string(),
+        source_filename: "hr.csv".to_string(),
+        file_type: "csv".to_string(),
+        file_size_bytes: 100,
+        content_sha256: "abc".to_string(),
+        owner_user_id: "usr-hr-1".to_string(),
+        scope: "hr".to_string(),
+        allowed_roles: r#"["hr","executive"]"#.to_string(),
+        allowed_users: "[]".to_string(),
+        version: 1,
+        acl_version: 1,
+        ingestion_status: "INDEXED".to_string(),
+        ingestion_error: None,
+        chunk_count: 1,
+        storage_path: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+    };
+
+    let owner_hr = AuthenticatedPrincipal {
+        user_id: "usr-hr-1".to_string(),
+        username: "siti.hr".to_string(),
+        email: "siti@local".to_string(),
+        role: UserRole::Hr,
+        explicit_permissions: vec![],
+        is_active: true,
+    };
+    let other_hr = AuthenticatedPrincipal {
+        user_id: "usr-hr-2".to_string(),
+        username: "other.hr".to_string(),
+        email: "other@local".to_string(),
+        role: UserRole::Hr,
+        explicit_permissions: vec![],
+        is_active: true,
+    };
+    let delegated_hr = AuthenticatedPrincipal {
+        user_id: "usr-hr-3".to_string(),
+        username: "lead.hr".to_string(),
+        email: "lead@local".to_string(),
+        role: UserRole::Hr,
+        explicit_permissions: vec!["doc:delete".to_string()],
+        is_active: true,
+    };
+
+    assert!(RBACPolicyEngine::can_manage_document(&owner_hr, &doc));
+    assert!(
+        !RBACPolicyEngine::can_manage_document(&other_hr, &doc),
+        "Non-owner HR without doc:delete must NOT be able to delete another user's document"
+    );
+    assert!(RBACPolicyEngine::can_manage_document(&delegated_hr, &doc));
 }
